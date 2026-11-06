@@ -1,0 +1,164 @@
+{
+  "secrets": [
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.keystore",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "credentials",
+    "credentials.json",
+    "cookies.txt",
+    "cookies.sqlite"
+  ],
+  "secretExceptions": [
+    ".env.example",
+    ".env.sample",
+    ".env.template",
+    ".env.dist"
+  ],
+  "infra": [
+    ".gitlab-ci.yml",
+    ".github/workflows/**",
+    "Jenkinsfile*",
+    "Dockerfile*",
+    "docker-compose*",
+    "compose.yml",
+    "compose.yaml",
+    "nginx*.conf",
+    "Procfile",
+    "ecosystem.config.*",
+    "k8s/**",
+    "helm/**",
+    "terraform/**"
+  ],
+  "depManifests": [
+    "package.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lockb",
+    "bun.lock",
+    "requirements*.txt",
+    "pyproject.toml",
+    "poetry.lock",
+    "uv.lock",
+    "Pipfile",
+    "Pipfile.lock",
+    "Cargo.toml",
+    "Cargo.lock",
+    "go.mod",
+    "go.sum",
+    "Gemfile",
+    "Gemfile.lock",
+    "composer.json",
+    "composer.lock"
+  ],
+  "bash": [
+    {
+      "id": "git-history",
+      "pattern": "^git(?:\\s+(?:-C|-c)\\s+\\S+|\\s+--\\S+)*\\s+(?:commit|push|pull|fetch|merge|rebase|cherry-pick|revert|am|tag(?!\\s+(?:-l|--list)\\b))\\b",
+      "reason": "Agents don't commit or touch remotes. The user commits after review."
+    },
+    {
+      "id": "git-branch",
+      "pattern": "^git(?:\\s+(?:-C|-c)\\s+\\S+|\\s+--\\S+)*\\s+(?:branch\\s+(?!-a\\b|-r\\b|-v\\b|-vv\\b|--all\\b|--list\\b|--show-current\\b|--contains\\b)\\S|checkout\\s+-[bB]\\b|switch\\b|worktree\\s+(?:add|remove|move|prune)\\b)",
+      "reason": "Agents don't create or switch branches or worktrees."
+    },
+    {
+      "id": "git-destructive",
+      "pattern": "^git(?:\\s+(?:-C|-c)\\s+\\S+|\\s+--\\S+)*\\s+(?:(?:reset|clean|stash|restore|rm)\\b|checkout\\s+(?:--|\\.)(?:\\s|$))",
+      "reason": "This can discard uncommitted work."
+    },
+    {
+      "id": "git-init",
+      "pattern": "^git\\s+init\\b",
+      "reason": "git init needs \"Scope: git-init\" in the approved plan.",
+      "unlessScope": "git-init"
+    },
+    {
+      "id": "git-remote",
+      "pattern": "^git(?:\\s+(?:-C|-c)\\s+\\S+|\\s+--\\S+)*\\s+remote\\s+(?:add|remove|rm|rename|set-url)\\b|^(?:gh|glab)\\s+(?:pr|mr|release|repo|api|issue)\\b",
+      "reason": "Agents don't touch git remotes or open PRs."
+    },
+    {
+      "id": "kill",
+      "pattern": "^(?:kill|pkill|killall)\\b|^fuser\\b.*\\s-k\\b",
+      "reason": "Agents never stop processes. The user manages them."
+    },
+    {
+      "id": "root",
+      "pattern": "^(?:sudo|doas|su)\\b",
+      "reason": "No root access."
+    },
+    {
+      "id": "pipe-to-shell",
+      "scope": "command",
+      "pattern": "\\b(?:curl|wget)\\b[^|\\n]*\\|\\s*(?:sudo\\s+)?(?:ba|z|da|fi)?sh\\b|\\b(?:ba|z)?sh\\s+<\\(\\s*(?:curl|wget)\\b",
+      "reason": "Don't run downloaded scripts."
+    },
+    {
+      "id": "publish",
+      "pattern": "^(?:npm|pnpm|yarn|bun)\\s+publish\\b|^docker\\s+push\\b|^cargo\\s+publish\\b|^twine\\s+upload\\b|^gem\\s+push\\b",
+      "reason": "Agents never publish."
+    },
+    {
+      "id": "deploy",
+      "pattern": "^terraform\\s+(?:apply|destroy)\\b|^kubectl\\s+(?:apply|delete|rollout|scale)\\b|^helm\\s+(?:install|upgrade|uninstall|delete)\\b",
+      "reason": "Agents never deploy."
+    },
+    {
+      "id": "install",
+      "pattern": "^(?:npm|pnpm|bun)\\s+(?:i|install|add)\\s+(?:-\\S+\\s+)*[^-\\s]|^(?:npm|pnpm|yarn|bun)\\s+(?:add|remove|rm|uninstall|update|upgrade|up)\\b|^(?:npm|pnpm)\\s+(?:-g|--global)\\b|^pip3?\\s+install\\b|^uv\\s+(?:add|remove)\\b|^poetry\\s+(?:add|remove)\\b|^cargo\\s+(?:add|remove|install)\\b|^go\\s+(?:get|install)\\b|^gem\\s+install\\b|^composer\\s+(?:require|remove)\\b|^(?:dnf|yum|apt|apt-get|brew|pacman)\\s+\\S",
+      "reason": "Dependency changes need \"Scope: deps\" in the approved plan.",
+      "unlessScope": "deps"
+    },
+    {
+      "id": "dev-server",
+      "pattern": "^(?:npm|pnpm|yarn|bun)\\s+(?:run\\s+)?(?:dev|start|serve|preview)\\b|^npx\\s+(?:vite|next|astro|nuxt)(?:\\s+(?:dev|start|preview))?\\s*$|^(?:pm2|nodemon|forever|systemctl|service)\\b|^(?:python3?\\s+)?(?:\\./)?manage\\.py\\s+runserver\\b|^(?:bundle\\s+exec\\s+)?rails\\s+(?:s|server)\\b|^flask\\s+run\\b|^(?:uvicorn|gunicorn|hypercorn)\\b|^php\\s+artisan\\s+serve\\b|^docker[ -]compose\\s+(?:up|down|stop|restart|start)\\b|^docker-compose\\s+(?:up|down|stop|restart|start)\\b",
+      "reason": "Agents never run servers directly. QA uses enki server. Anyone else: stop and report it."
+    },
+    {
+      "id": "herdr-control",
+      "pattern": "^herdr\\s+(?:server\\s+stop|session\\b|agent\\s+(?:send-keys|start|attach)|pane\\s+(?:close|send-keys|send-text|run|move|swap)|tab\\s+close|workspace\\s+(?:close|delete|remove)|worktree\\s+remove)\\b",
+      "reason": "Use enki commands. Direct herdr control could answer a permission prompt or close another agent."
+    },
+    {
+      "id": "rm-indirect",
+      "pattern": "^rm\\b.*(?:\\$|`|\\*|\\?|\\{\\})|^find\\b.*\\s-delete\\b",
+      "reason": "Delete only by literal path, never through variables, substitutions or globs."
+    },
+    {
+      "id": "rm-broad",
+      "pattern": "^rm\\b.*\\s(?:/|~|\\.|\\.\\.)/?(?:\\s|$)",
+      "reason": "That deletes far too much."
+    },
+    {
+      "id": "db-destructive",
+      "scope": "command",
+      "flags": "i",
+      "pattern": "\\bdrop\\s+(?:database|schema|table|collection)\\b|\\btruncate\\s+table\\b|\\bflushall\\b|\\bflushdb\\b|\\bdropDatabase\\s*\\(",
+      "reason": "Destructive database operations need user approval."
+    },
+    {
+      "id": "blind-git",
+      "blindOnly": true,
+      "pattern": "^git(?:\\s+(?:-C|-c)\\s+\\S+|\\s+--\\S+)*\\s+(?:diff|show|blame|log\\s.*(?:-p\\b|--patch|--stat))",
+      "reason": "This role works from the requirements, so it can't look at the coder's changes."
+    },
+    {
+      "id": "blind-search",
+      "blindOnly": true,
+      "pattern": "^(?:rg|ag|ack)\\b|^e?grep\\b.*\\s-[a-zA-Z]*[rR]",
+      "reason": "A recursive search would reach the coder's changes. Search your test folders by name."
+    }
+  ]
+}

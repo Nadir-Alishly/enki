@@ -1,0 +1,14 @@
+{
+  "name": "enki-plugins",
+  "description": "Enki: orchestration for Claude Code on herdr.",
+  "owner": {
+    "name": "Nadir Alishly"
+  },
+  "plugins": [
+    {
+      "name": "enki",
+      "source": "./",
+      "description": "Runs a Claude session as a software development orchestrator with a herdr team, enforced by a CLI and hooks."
+    }
+  ]
+}

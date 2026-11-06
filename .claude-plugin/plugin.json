@@ -1,0 +1,9 @@
+{
+  "name": "enki",
+  "displayName": "Enki",
+  "version": "0.1.0",
+  "description": "Runs a Claude session as a software development orchestrator with a herdr team of scout, coder, tester and reviewer, enforced by a CLI and hooks.",
+  "author": { "name": "Nadir Alishly" },
+  "license": "MIT",
+  "keywords": ["orchestration", "agents", "herdr", "workflow", "multi-agent"]
+}
