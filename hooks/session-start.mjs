@@ -1,7 +1,7 @@
 // Injects the orchestrator role, and reports a worker's hooks as live so `enki` can verify them.
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { loadConfig } from '../src/config.mjs'
+import { loadProjectConfig } from '../src/memory.mjs'
 import { pluginRoot } from '../src/paths.mjs'
 import { readState, recordEvent, resolveTask } from '../src/state.mjs'
 import { locate, out, readInput } from './lib.mjs'
@@ -23,7 +23,7 @@ function run() {
   }
   let config
   try {
-    config = loadConfig(where.root)
+    config = loadProjectConfig(where.root)
   } catch (error) {
     context(`Enki: this project's config is invalid, so orchestration is off until it's fixed.\n${error.message}`)
     return

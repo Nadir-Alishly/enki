@@ -88,9 +88,22 @@ function repoFor(ctx, path) {
   return ctx.state?.repos.find(repo => isInside(path, repo.workdir)) ?? null
 }
 
+const MEMORY_FILES = new Set(['notes.md', 'repo.json', 'playbook.md'])
+
+/** The memory checkout of a repo in the bound task, if `path` is one of its files. */
+const taskMemoryFile = (ctx, path) =>
+  (ctx.state?.repos ?? []).find(repo => repo.memoryDir && dirname(path) === repo.memoryDir && MEMORY_FILES.has(basename(path)))
+
 function orchestratorWrite(ctx, path) {
   const enkiDir = join(ctx.root, '.enki')
   const home = homedir()
+  // Its own task's memory, on the task's branch: the one place in a worktree it may write.
+  if (taskMemoryFile(ctx, path)) return null
+  if (isInside(path, join(enkiDir, 'memory'))) return 'Private memory is written only by enki. Edit your task\'s memory checkout instead (enki status shows it).'
+  // During a task, the main tree's memory is the base branch's: changes go on the task's branch.
+  const mainMemory = ctx.state?.worktrees?.length > 0 && MEMORY_FILES.has(basename(path)) && (ctx.state?.repos ?? []).some(repo => repo.main && dirname(path) === join(repo.main, '.enki'))
+  if (mainMemory) return 'That is the main tree\'s memory. During a task, write the task\'s copy instead (enki status shows it), so it reaches the base branch only through the merge.'
+  if (isInside(path, join(enkiDir, 'worktrees'))) return 'The orchestrator never edits project files. Delegate this to the coder.'
   if (isInside(path, enkiDir)) {
     if (STATE_FILES.has(basename(path)) && isInside(path, join(enkiDir, 'tasks'))) {
       return `${basename(path)} is written by enki, not edited by hand.`
@@ -113,12 +126,19 @@ function workerWrite(ctx, path) {
     const allowed = REPORT_PREFIXES[role].some(prefix => name.startsWith(prefix))
     return allowed ? null : `${role} may only write its own reports in the task folder, not ${name}.`
   }
-  if (isInside(path, join(ctx.root, '.enki'))) return 'Notes, config and the playbook belong to the orchestrator. Suggest changes in your report.'
+  // A task's own worktree lives under .enki, and is the only part of it a worker may write.
+  if (isInside(path, join(ctx.root, '.enki')) && !repoFor(ctx, path)) {
+    if (state.slug && isInside(path, join(ctx.root, '.enki', 'worktrees', state.slug))) return 'Memory belongs to the orchestrator. Suggest changes in your report.'
+    return isInside(path, join(ctx.root, '.enki', 'worktrees'))
+      ? 'That is another task\'s worktree.'
+      : 'Notes, config and the playbook belong to the orchestrator. Suggest changes in your report.'
+  }
   if (role === 'scout' || role === 'reviewer' || role === 'qa') return `${role} is read-only, apart from its own report.`
 
   const repo = repoFor(ctx, path)
   if (!repo) return 'This path is outside the repos of this task.'
   const inRepo = relative(repo.workdir, path).split(sep).join('/')
+  if (inRepo === '.enki' || inRepo.startsWith('.enki/')) return 'The repo\'s memory (notes, commands, playbook) belongs to the orchestrator. Suggest changes in your report.'
   const isTest = matchesGlobs(inRepo, repo.testGlobs ?? [])
 
   if (role === 'tester') {

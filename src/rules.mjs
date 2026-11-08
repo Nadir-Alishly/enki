@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pluginRoot } from './paths.mjs'
 import { renderSkills } from './skills.mjs'
+import { playbookTexts, taskNotesPath } from './memory.mjs'
 
 const fill = (template, values) =>
   template.replace(/\{\{(\w+)\}\}/g, (match, key) => (key in values ? String(values[key]) : match))
@@ -12,6 +13,9 @@ function repoLines(state, config) {
     .map(repo => {
       const source = config.repos.find(item => item.name === repo.name)
       const lines = [`- **${repo.name}** at \`${repo.workdir}\``]
+      const tree = state.worktrees?.find(item => item.path === repo.worktree)
+      if (tree) lines.push(`  - Worktree on branch \`${tree.branch}\`, from \`${tree.base.branch}\`. Work only here: the main tree at \`${repo.main}\` is read-only`)
+      lines.push(`  - Notes: \`${taskNotesPath(state, repo)}\``)
       if (repo.url) lines.push(`  - Local URL: ${repo.url}`)
       if (source?.test.length) lines.push(`  - Tests: \`${source.test.join('`, `')}\``)
       if (source?.lint.length) lines.push(`  - Lint: \`${source.lint.join('`, `')}\``)
@@ -25,14 +29,19 @@ function repoLines(state, config) {
     .join('\n')
 }
 
-/** The playbook's "## All" section plus nothing else: role sections go in each role file. */
-export function playbookSection(root, heading) {
-  const path = join(root, '.enki', 'playbook.md')
-  if (!existsSync(path)) return ''
+/** One heading's text from every playbook in the task: the project's, then each repo's. */
+export function playbookSection(state, heading) {
+  return playbookTexts(state)
+    .map(text => sectionOf(text, heading))
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+function sectionOf(text, heading) {
   const wanted = heading.toLowerCase()
   let collecting = false
   const lines = []
-  for (const line of readFileSync(path, 'utf8').split('\n')) {
+  for (const line of text.split('\n')) {
     const match = /^##\s+(.+?)\s*$/.exec(line)
     if (match) collecting = match[1].toLowerCase() === wanted
     else if (collecting) lines.push(line)
@@ -45,7 +54,7 @@ export function playbookSection(root, heading) {
 
 export function renderRules(state, config) {
   const template = readFileSync(join(pluginRoot, 'templates', 'rules.md'), 'utf8')
-  const playbook = playbookSection(state.projectRoot, 'All')
+  const playbook = playbookSection(state, 'All')
   return fill(template, {
     slug: state.slug,
     taskDir: state.taskDir,
@@ -64,9 +73,10 @@ export function writeRules(state, config) {
 export function writeRoleFile(state, config, role, skills = []) {
   const parts = [readFileSync(join(pluginRoot, 'roles', `${role}.md`), 'utf8').trim()]
   if (role === 'qa') {
-    parts.push(readFileSync(join(pluginRoot, 'roles', 'browser', `${config.browser.driver}.md`), 'utf8').trim())
+    const driver = config.browser.driver === 'playwright' && !state.repos.some(repo => repo.url) ? 'none' : config.browser.driver
+    parts.push(readFileSync(join(pluginRoot, 'roles', 'browser', `${driver}.md`), 'utf8').trim())
   }
-  const playbook = playbookSection(state.projectRoot, role)
+  const playbook = playbookSection(state, role)
   if (playbook !== '') parts.push(`## Project rules for the ${role}\n\n${playbook}`)
   const skillText = renderSkills(skills, state.projectRoot)
   if (skillText !== '') parts.push(skillText)

@@ -1,7 +1,8 @@
 // Enforces the policy. Inside an enki session it fails closed: an error here denies the call.
 import { basename, dirname } from 'node:path'
 import { changedSource } from '../src/checks.mjs'
-import { ConfigError, loadConfig } from '../src/config.mjs'
+import { ConfigError } from '../src/config.mjs'
+import { loadProjectConfig, loadTaskConfig } from '../src/memory.mjs'
 import { BLIND_ROLES, decide } from '../src/policy.mjs'
 import { readState, recordEvent, resolveTask } from '../src/state.mjs'
 import { locate, out, readInput } from './lib.mjs'
@@ -35,13 +36,13 @@ function run() {
     deny('This worker is missing ENKI_PROJECT or ENKI_TASK.')
     return
   }
-  const config = loadConfig(root)
   const state = worker ? readState(taskDir) : resolveTask(root)
+  const config = state ? loadTaskConfig(state) : loadProjectConfig(root)
   if (!worker && config.mode !== 'auto' && !state) return
 
   // Worked out on every call: the tester runs alongside the coder, so a stale list would leak.
   if (worker && BLIND_ROLES.has(where.role) && state.treeSnapshot) {
-    state.blindFiles = changedSource(state.repos, state.treeSnapshot, state.projectRoot)
+    state.blindFiles = changedSource(state.repos, state.treeSnapshot)
   }
 
   const ctx = { role: where.role, root, cwd: input.cwd ?? process.cwd(), config, state }

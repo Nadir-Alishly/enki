@@ -23,7 +23,52 @@ The process is enforced by a CLI and hooks, not left to the model's memory. The 
 7. **Fix loop.** Problems go back to the coder, up to 3 rounds. After that, enki stops and reports.
 8. **Report.** Repo notes are updated, and you get a report with a scored retrospective on how the task was run.
 
-Agents never commit. You review the working tree and commit it yourself.
+Agents never commit. Each task works in its own git worktree, and when it finishes, enki commits the work to a branch named after the task. You review the branch and merge it yourself.
+
+## Parallel tasks
+
+Every task gets its own git worktree, branch, port and, if the plan says so, database, so several tasks can run in the same repo at once.
+
+- **Starting:** `enki task new dark-mode` creates the branch `dark-mode` from the branch you're on, and a worktree under `.enki/worktrees/`. The main tree must have no uncommitted changes, because the task starts from the last commit.
+- **What git doesn't carry:** enki copies the gitignored files in `worktree.copy`, such as `.env*`, and links the folders in `worktree.link`, such as `node_modules`. If the approved plan has `Scope: deps`, the task gets its own install with `worktree.install`.
+- **Ports:** each task's server gets a free port from `ports`, through `{port}` in `devServer.start` and the `PORT` variable. A machine-wide registry stops two tasks picking the same one.
+- **Per-task settings:** `worktree.env` sets values in the copied env files and the task's processes. It can use `{port}`, `{port:<repo>}` and `{task}`.
+- **Databases:** with a `database` section, each plan says `Database: copy`, `shared` or `none`. `copy` runs your `copy` command at team start and `drop` at the end. `none` blanks the database env values, so nothing reaches the real database by accident.
+- **Finishing:** enki removes its copies and links, commits everything else to the task's branch under your git identity, with your git hooks, and removes the worktree. The output gives the branch and `git diff <base>...<slug>` to review it. If a hook refuses the commit, the task stays open. An empty task's branch is deleted, and `--abandon` commits the work as WIP.
+
+```json
+{
+  "repos": [{ "path": "web", "url": "http://localhost:5173", "devServer": { "start": "npm run dev -- --port {port} --strictPort" } }],
+  "worktree": { "copy": [".env", ".env.*"], "link": ["node_modules"], "install": "npm ci", "env": {} },
+  "ports": { "from": 4400, "to": 4999 },
+  "database": { "copy": "createdb -T app app_{task}", "drop": "dropdb --if-exists app_{task}", "env": { "DATABASE_URL": "postgres://localhost/app_{task}" } }
+}
+```
+
+Set `"worktrees": false` for a project that isn't in git. Tasks then share one tree, and enki allows one open task per repo.
+
+## Browser testing
+
+QA tests in its own headless browser through the [Playwright MCP server](https://github.com/microsoft/playwright-mcp). Each QA run gets a fresh, isolated, logged-out browser, so several tasks can test at once. Screenshots go to `qa-evidence/` in the task folder.
+
+Set it up once per machine:
+
+```
+enki playwright status
+enki playwright install            # @playwright/mcp, pinned, about 20 MB
+enki playwright install --browser  # only if you have no Chrome or Chromium, about 150 MB
+```
+
+Everything goes into `~/.enki/playwright`, never into your projects. Enki uses an installed Chrome or Chromium if it finds one, and downloads only when you run the command. `enki team start` stops with these instructions if something is missing.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `memory` | `repo` | `repo` or `private`: see Memory |
+| `browser.driver` | `playwright` | `playwright`, `chrome` (Claude in Chrome, one task at a time) or `none` |
+| `browser.headless` | `true` | `false` opens a visible window |
+| `browser.executable` | | Absolute path to a Chrome or Chromium to use |
+
+QA's browser is limited to the project's own local URLs with Playwright's `--allowed-origins`. That keeps it on the project's pages, but Playwright notes it isn't a security boundary. QA also gets only the Playwright MCP server, none of your others.
 
 ## Dev servers
 
@@ -48,7 +93,7 @@ Nothing else can start or stop servers: each project's own commands are blocked 
 - Claude Code 2.1.318 or newer
 - [herdr](https://herdr.dev), with Claude running inside a herdr pane
 - Node 22 or newer
-- Claude in Chrome, for browser testing (optional: set `"driver": "none"` without it)
+- For browser testing, an installed Chrome or Chromium, or let enki download one (see below)
 
 ## Install
 
@@ -66,6 +111,26 @@ Then, in your project, inside a herdr pane:
 ```
 
 Start a new session afterwards. It runs as the orchestrator: describe a change and the task begins.
+
+## Memory
+
+Enki keeps what it learns about each repo in three files: `notes.md` (architecture, conventions, how to test, gotchas), `repo.json` (its test, lint and dev-server commands) and `playbook.md` (team rules). They change on a task's branch, so they reach your base branch only when you merge the code. A task you never merge never leaves wrong notes behind.
+
+Pick one mode per project. `/enki:init` asks, or run `enki migrate`:
+
+| | `repo` (default) | `private` |
+|---|---|---|
+| Where | `<repo>/.enki/`, committed with the code | `.enki/memory/<repo>/`, a local git repo, never pushed |
+| For | Your own repos, or teams that all use enki | Team repos where others don't use enki |
+| Follows merges | Exactly: git does it, including squashes, cherry-picks and reverts | By detection at each `enki task new` or `enki memory sync`: merges, fast-forwards, rebases, and squashes of enki's single commit |
+| Misses | Nothing | A squash mixed with other commits, and cherry-picks: run `enki memory merge <slug>`. Reverting code doesn't revert memory |
+| Backup | Pushed with the code | Only on this clone, unless you push the memory repo somewhere private |
+
+In private mode, `.enki/` is hidden from the team through your clone's `.git/info/exclude`, never a committed `.gitignore`. Memory branches mirror your code branches, and a memory conflict stops `enki memory sync` with a path to resolve it in.
+
+With several repos, each has its own memory, and each follows its own merges. Knowledge about a contract between repos, such as an API, goes on both sides: the backend's notes say what it provides, and the frontend's notes say how it uses it.
+
+During a task, only the orchestrator writes memory, and only its own task's copy. Workers can't write memory at all. `enki migrate` warns if your old shared notes may contain knowledge from task branches you haven't merged.
 
 ## Worker skills
 
@@ -120,7 +185,6 @@ The orchestrator drives the `enki` CLI, which is on the Bash `PATH` while the pl
 | `repos[]` | | `path` (required), `name`, `test`, `lint`, `url`, `testGlobs`, `devServer`, `gate` |
 | `team` | Haiku for scout, tester and QA, Sonnet for coder and reviewer, no skills | `model`, `effort` and `skills` per role |
 | `permissionMode` | `auto` | Permission mode for workers |
-| `browser.driver` | `chrome` | `chrome` or `none` |
 | `timeouts` | 15 to 30 minutes, 2 for server start | Milliseconds per step |
 | `maxFixRounds` | `3` | Fix rounds before enki stops |
 | `policy` | | `secrets` and `protected` globs, and `bash` rules with `pattern` and `reason`. These can only add restrictions |
@@ -148,10 +212,12 @@ A plan sets options with lines you approve: `Tests: none` or `QA: none` to skip 
 | Test results mean something | `enki verify` refuses while the coder or tester is working |
 | No commits, pushes, destructive git, kills, `sudo`, publishing, package installs, server control | `PreToolUse` hook, including through `bash -c`, `eval`, `xargs`, `find -exec`, substitutions and env wrappers |
 | Fix rounds stop at the limit | `enki round next` refuses |
+| Each task stays in its own worktree | The hook lets workers write only their task's worktree. The main tree, other tasks' worktrees and, for the orchestrator, all worktrees are refused |
+| Secrets stay out of commits | Enki removes everything it copied or linked before it commits |
 | QA only runs on finished code | `enki ask qa` needs the coder's report for the round |
 | Blocked workers are handled at once | `enki ask` returns immediately, and `enki answer` allows only one-time options and logs each one |
 | Workers really run the hooks | `enki` waits for each worker to report its hooks live, and fails if it doesn't |
-| Only one tester uses Chrome | A machine-wide lock |
+| Only one QA agent uses Claude in Chrome | A machine-wide lock, for the `chrome` driver only. Playwright needs none |
 | Agents don't run servers | `PreToolUse` hook, with `enki` as the only route |
 
 If the policy check itself fails inside an enki session, the call is refused.

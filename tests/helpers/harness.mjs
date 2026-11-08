@@ -4,19 +4,30 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFi
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { MCP_VERSION } from '../../src/playwright.mjs'
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
 const enkiBin = join(repoRoot, 'bin/enki')
 const fakeHerdr = join(repoRoot, 'tests/helpers/fake-herdr.mjs')
 
+/** A stand-in for `enki playwright install`, so team starts don't need the network. */
+export function fakePlaywrightInstall(enkiHome, version = MCP_VERSION) {
+  const dir = join(enkiHome, 'playwright/node_modules/@playwright/mcp')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: '@playwright/mcp', version }))
+  writeFileSync(join(dir, 'cli.js'), '')
+}
+
 export function makeProject(config = {}) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'enki-test-')))
   const root = join(base, 'project')
+  const fakeBrowser = join(base, 'fake-chrome')
+  writeFileSync(fakeBrowser, '')
   mkdirSync(join(root, '.enki/tasks'), { recursive: true })
   mkdirSync(join(root, 'web/src'), { recursive: true })
   writeFileSync(
     join(root, '.enki/config.json'),
-    JSON.stringify({ id: 'proj1', repos: [{ path: 'web', test: ['npm test'], url: 'http://localhost:4321', testGlobs: ['tests/**'], devServer: { managedBy: 'user' } }], ...config }),
+    JSON.stringify({ id: 'proj1', repos: [{ path: 'web', test: ['npm test'], url: 'http://localhost:4321', testGlobs: ['tests/**'], devServer: { managedBy: 'user' } }], browser: { executable: fakeBrowser }, worktrees: false, ...config }),
   )
   const herdrState = join(base, 'herdr.json')
   const env = {
@@ -30,6 +41,7 @@ export function makeProject(config = {}) {
     HERDR_PANE_ID: 'w1:orch',
   }
   mkdirSync(env.HOME, { recursive: true })
+  fakePlaywrightInstall(env.ENKI_HOME)
 
   const herdr = {
     read: () => JSON.parse(readFileSync(herdrState, 'utf8')),
@@ -86,7 +98,7 @@ export function makeProject(config = {}) {
 
   const git = (...args) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { cwd: root, encoding: 'utf8' })
 
-  return { base, root, env, herdr, enki, hook, taskDir, state, events, brief, approve, report, asWorker, git, write: writeFileSync }
+  return { base, root, env, fakeBrowser, herdr, enki, hook, taskDir, state, events, brief, approve, report, asWorker, git, write: writeFileSync }
 }
 
 function readdirNames(dir) {

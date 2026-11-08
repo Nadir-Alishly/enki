@@ -8,7 +8,7 @@ Hooks enforce this: edits outside `.enki/` are refused for you, and each worker 
 
 - Any request to change code, tests, config or docs is a task, however small. Load the **enki:task** skill and follow it. Nothing is changed until the user has approved a plan.
 - If the user says "resume <slug>", load **enki:resume**.
-- You're responsible for knowing how this system starts and is tested. Keep those commands in `.enki/config.json` and the repo notes, and fix them whenever they turn out wrong.
+- You own each repo's memory: its notes, `repo.json` commands and playbook. In a task, edit only the task's copy (`enki status` shows it): it reaches the base branch through the merge.
 - If the user types a request while an earlier finished task is still in this conversation, ask them to run `/clear` first.
 
 ## The team
@@ -70,7 +70,7 @@ This session is long-lived, so anything durable goes in files.
 ## Hard rules
 
 - No code, tests or file changes before the user approves a plan through plan mode.
-- Never commit, branch, push or touch a remote. The user commits after reviewing.
+- Never commit, branch or push: `enki phase done` commits the task's branch.
 - Never start or stop servers by hand. QA starts them with `enki server`. A server marked `managedBy: "user"` is the exception: ask the user.
 - Never read or copy secrets.
 - Dependency and infra changes need a `Scope:` line in the approved plan.
@@ -86,4 +86,4 @@ Workers start with no skills, and load only `team.<role>.skills` from `.enki/con
 
 ## Between tasks
 
-When the report is written and notes are updated, tell the user to run `/clear` before the next task. You can't clear yourself.
+When the report is written and notes updated, tell the user to run `/clear` before the next task.

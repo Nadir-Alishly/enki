@@ -10,7 +10,7 @@ Coder and reviewer briefs give the goal, acceptance criteria, affected repos and
 
 ## 1. Baseline
 
-1. Run `enki team start`. If it says nobody has recorded the start command, work it out from the scout report, correct `.enki/config.json` and the notes, then run it again. If it exits 3, a folder trust prompt is waiting: ask the user whether to trust the folder, and if they agree, run `enki answer <role> trust`, then `enki start <role>`.
+1. Run `enki team start`. If it says Playwright or a browser is missing, ask the user before running the `enki playwright install` command it names, because it downloads software. If it says nobody has recorded the start command, work it out from the scout report, correct `.enki/config.json` and the notes, then run it again. If it exits 3, a folder trust prompt is waiting: ask the user whether to trust the folder, and if they agree, run `enki answer <role> trust`, then `enki start <role>`.
 2. Run `git status` in the affected repos. Dirty files are the user's own: leave them alone.
 3. Run `enki phase baseline`, then `enki verify --baseline`. If it fails, have the tester sort stable pre-existing failures from flaky ones, and add them to the repo notes. A brand-new repo has nothing to run.
 
