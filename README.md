@@ -112,6 +112,17 @@ How it works:
 
 Tasks started before the dashboard existed show their history, but not their tokens, steps or tool calls.
 
+## What enki runs, reads and sends
+
+Enki has no telemetry and no server of its own. Everything below happens on your computer, in projects with `.enki/config.json`.
+
+- **Hooks.** On every tool call in an enki project, the PreToolUse hook checks the call against the task policy and appends the tool's name and target to the task's `activity.jsonl`. The SessionStart hook gives the orchestrator its role and records its session ID on the task. Outside enki projects the hooks do nothing.
+- **Agents.** `enki team start` opens herdr panes and starts Claude Code in them with `--permission-mode` set to your `permissionMode` setting, `auto` by default. Enki never changes your Claude settings files and refuses `bypassPermissions`.
+- **Git.** Each task gets a worktree and a branch in your repo. Enki copies the gitignored files listed in `worktree.copy`, such as `.env` files, into the worktree, and commits to the task's branch when the task finishes. It never pushes.
+- **Your commands.** `enki verify` runs your configured test commands. Team start runs your dev server, install and database copy commands when the config and plan ask for them.
+- **Files outside your projects.** Enki writes to `~/.enki/`: the project registry, the port registry, the dashboard's cache and log, and the Playwright install. The dashboard reads Claude Code's transcripts in `~/.claude/projects/` to count tokens.
+- **Network.** `enki playwright install` downloads `@playwright/mcp` 0.0.83 from the npm registry, and Chromium only with `--browser`. The dashboard page loads the Geist font from Google Fonts. Enki checks your dev server on localhost. Nothing else leaves your computer through enki.
+
 ## Requirements
 
 - Claude Code 2.1.318 or newer
