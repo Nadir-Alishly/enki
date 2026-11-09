@@ -2,8 +2,11 @@
   "name": "enki",
   "displayName": "Enki",
   "version": "0.1.0",
-  "description": "Runs a Claude session as a software development orchestrator with a herdr team of scout, coder, tester and reviewer, enforced by a CLI and hooks.",
+  "description": "Runs a Claude session as a software development orchestrator with a herdr team of scout, coder, tester, QA and reviewer, enforced by a CLI and hooks.",
   "author": { "name": "Nadir Alishly" },
+  "homepage": "https://github.com/Nadir-Alishly/enki",
+  "repository": "https://github.com/Nadir-Alishly/enki",
   "license": "MIT",
+  "icon": "./.claude-plugin/icon.png",
   "keywords": ["orchestration", "agents", "herdr", "workflow", "multi-agent"]
 }
