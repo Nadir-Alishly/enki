@@ -4,13 +4,13 @@ import { dirname, join, resolve } from 'node:path'
 
 export const ROLES = ['scout', 'coder', 'tester', 'qa', 'reviewer']
 export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk']
-export const BROWSER_DRIVERS = ['chrome', 'none']
+export const BROWSER_DRIVERS = ['playwright', 'chrome', 'none']
 
 export const DEFAULTS = {
   version: 1,
   mode: 'auto',
   permissionMode: 'auto',
-  browser: { driver: 'chrome' },
+  browser: { driver: 'playwright', headless: true },
   repos: [],
   team: {
     scout: { model: 'claude-haiku-5-5', effort: 'high' },
@@ -32,6 +32,11 @@ export const DEFAULTS = {
   },
   maxFixRounds: 3,
   policy: { secrets: [], protected: [], bash: [] },
+  memory: 'repo',
+  worktrees: true,
+  ports: { from: 4400, to: 4999 },
+  worktree: { copy: ['.env', '.env.*'], link: ['node_modules'], install: null, env: {} },
+  database: null,
 }
 
 const DEFAULT_TEST_GLOBS = [
@@ -40,11 +45,29 @@ const DEFAULT_TEST_GLOBS = [
 ]
 
 const TOP_KEYS = new Set(['$schema', 'id', ...Object.keys(DEFAULTS)])
-const REPO_KEYS = new Set(['name', 'path', 'test', 'lint', 'url', 'testGlobs', 'devServer', 'gate'])
+const REPO_KEYS = new Set(['name', 'path', 'test', 'lint', 'url', 'testGlobs', 'devServer', 'gate', 'worktree'])
+const WORKTREE_KEYS = new Set(['copy', 'link', 'install', 'env'])
+const DATABASE_KEYS = new Set(['copy', 'drop', 'env'])
+const isStringMap = value => value !== null && typeof value === 'object' && !Array.isArray(value) && Object.values(value).every(item => typeof item === 'string')
+
+function validateWorktree(value, label, problems) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    problems.push(`${label}: must be an object`)
+    return
+  }
+  checkUnknown(value, WORKTREE_KEYS, label, problems)
+  for (const key of ['copy', 'link']) {
+    if (value[key] !== undefined && !isStringArray(value[key])) problems.push(`${label}.${key}: must be an array of paths`)
+    else if (value[key]?.some(path => path.startsWith('/') || path.split('/').includes('..'))) problems.push(`${label}.${key}: paths must be inside the repo`)
+  }
+  if (value.install !== undefined && value.install !== null && typeof value.install !== 'string') problems.push(`${label}.install: must be a command`)
+  if (value.env !== undefined && !isStringMap(value.env)) problems.push(`${label}.env: must map names to strings`)
+}
 const DEV_SERVER_KEYS = new Set(['managedBy', 'start', 'stop', 'reload', 'restartFor'])
 const GATE_KEYS = new Set(['commands', 'fast', 'suppressions'])
 const POLICY_KEYS = new Set(['secrets', 'protected', 'bash'])
 const TEAM_KEYS = new Set(['model', 'effort', 'skills'])
+const BROWSER_KEYS = new Set(['driver', 'headless', 'executable'])
 const SKILL_NAME = /^[A-Za-z0-9][\w.-]*(:[A-Za-z0-9][\w.-]*)?$/
 
 export class ConfigError extends Error {
@@ -116,6 +139,7 @@ function validateRepo(repo, index, problems, names) {
       }
     }
   }
+  if (repo.worktree !== undefined) validateWorktree(repo.worktree, `${label}.worktree`, problems)
   if (repo.gate !== undefined) {
     if (typeof repo.gate !== 'object' || repo.gate === null) problems.push(`${label}.gate: must be an object`)
     else {
@@ -146,8 +170,15 @@ export function validateConfig(raw) {
   if (raw.permissionMode !== undefined && !PERMISSION_MODES.includes(raw.permissionMode)) {
     problems.push(`permissionMode: must be one of ${PERMISSION_MODES.join(', ')}`)
   }
-  if (raw.browser?.driver !== undefined && !BROWSER_DRIVERS.includes(raw.browser.driver)) {
-    problems.push(`browser.driver: must be one of ${BROWSER_DRIVERS.join(', ')}`)
+  if (raw.browser !== undefined) {
+    checkUnknown(raw.browser, BROWSER_KEYS, 'browser', problems)
+    if (raw.browser.driver !== undefined && !BROWSER_DRIVERS.includes(raw.browser.driver)) {
+      problems.push(`browser.driver: must be one of ${BROWSER_DRIVERS.join(', ')}`)
+    }
+    if (raw.browser.headless !== undefined && typeof raw.browser.headless !== 'boolean') problems.push('browser.headless: must be true or false')
+    if (raw.browser.executable !== undefined && (typeof raw.browser.executable !== 'string' || !raw.browser.executable.startsWith('/'))) {
+      problems.push('browser.executable: must be an absolute path')
+    }
   }
   if (raw.maxFixRounds !== undefined && (!Number.isInteger(raw.maxFixRounds) || raw.maxFixRounds < 0)) {
     problems.push('maxFixRounds: must be a non-negative integer')
@@ -179,6 +210,25 @@ export function validateConfig(raw) {
       else raw.policy.bash.forEach((rule, index) => validateBashRule(rule, index, problems))
     }
   }
+  if (raw.memory !== undefined && !['repo', 'private'].includes(raw.memory)) problems.push('memory: must be "repo" or "private"')
+  if (raw.memory === 'private' && raw.worktrees === false) problems.push('memory: "private" needs worktrees, because memory follows the task branch enki commits')
+  if (raw.worktrees !== undefined && typeof raw.worktrees !== 'boolean') problems.push('worktrees: must be true or false')
+  if (raw.worktree !== undefined) validateWorktree(raw.worktree, 'worktree', problems)
+  if (raw.ports !== undefined) {
+    const { from, to } = raw.ports
+    const valid = port => Number.isInteger(port) && port >= 1024 && port <= 65535
+    if (!valid(from) || !valid(to) || from > to) problems.push('ports: needs "from" and "to", between 1024 and 65535, with from <= to')
+  }
+  if (raw.database !== undefined && raw.database !== null) {
+    if (typeof raw.database !== 'object' || Array.isArray(raw.database)) problems.push('database: must be an object')
+    else {
+      checkUnknown(raw.database, DATABASE_KEYS, 'database', problems)
+      for (const key of ['copy', 'drop']) {
+        if (raw.database[key] !== undefined && typeof raw.database[key] !== 'string') problems.push(`database.${key}: must be a command`)
+      }
+      if (raw.database.env !== undefined && !isStringMap(raw.database.env)) problems.push('database.env: must map names to strings')
+    }
+  }
   if (problems.length > 0) throw new ConfigError(problems)
 }
 
@@ -191,17 +241,45 @@ function normalizeRepo(repo) {
     url: repo.url ?? null,
     testGlobs: repo.testGlobs ?? DEFAULT_TEST_GLOBS,
     devServer: { managedBy: 'enki', ...repo.devServer },
+    worktree: repo.worktree ?? {},
     gate: repo.gate ?? null,
   }
 }
 
-/** Reads, validates and fills defaults. Throws ConfigError on a bad file. */
-export function loadConfig(root) {
+/**
+ * Reads, validates and fills defaults. Throws ConfigError on a bad file.
+ * `repoJson(repo)` returns a repo's own settings from its memory (repo.json), which win over
+ * the same fields in config.json. The same validation applies wherever a field lives.
+ */
+export function loadConfig(root, { repoJson } = {}) {
   let raw
   try {
     raw = JSON.parse(readFileSync(configPath(root), 'utf8'))
   } catch (error) {
     throw new ConfigError([error.message])
+  }
+  const warnings = []
+  if (repoJson && Array.isArray(raw.repos)) {
+    const problems = []
+    raw.repos = raw.repos.map((repo, index) => {
+      let own
+      try {
+        own = repoJson(repo)
+      } catch (error) {
+        problems.push(error.message)
+        return repo
+      }
+      if (!own) return repo
+      const name = repo.name ?? repo.path
+      if (typeof own !== 'object' || Array.isArray(own)) {
+        problems.push(`${name}: repo.json must be an object`)
+        return repo
+      }
+      for (const key of ['path', 'name']) if (key in own) problems.push(`${name}: repo.json can't set "${key}", which belongs in .enki/config.json`)
+      for (const key of Object.keys(own)) if (key in repo && !['path', 'name'].includes(key)) warnings.push(`repos[${index}].${key} is set in both config.json and ${name}'s repo.json. The repo's value is used.`)
+      return { ...repo, ...own, path: repo.path, ...(repo.name ? { name: repo.name } : {}) }
+    })
+    if (problems.length > 0) throw new ConfigError(problems)
   }
   validateConfig(raw)
   const team = {}
@@ -214,5 +292,8 @@ export function loadConfig(root) {
     team,
     timeouts: { ...DEFAULTS.timeouts, ...raw.timeouts },
     policy: { ...DEFAULTS.policy, ...raw.policy },
+    ports: { ...DEFAULTS.ports, ...raw.ports },
+    worktree: { ...DEFAULTS.worktree, ...raw.worktree, env: { ...raw.worktree?.env } },
+    warnings,
   }
 }

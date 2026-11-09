@@ -1,8 +1,15 @@
 // The `enki` command. Output is short on purpose: it lands in the orchestrator's context.
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { parseArgs } from 'node:util'
-import { ConfigError, findProjectRoot, loadConfig, ROLES } from './config.mjs'
+import { ConfigError, DEFAULTS, findProjectRoot, ROLES } from './config.mjs'
+import { loadProjectConfig, loadTaskConfig, migrate, MemoryError, syncMemory } from './memory.mjs'
+
+const loadConfigDefaults = () => ({ ...DEFAULTS, browser: { ...DEFAULTS.browser } })
+import { DashboardError, dashboardStatus, ensureDashboard, stopDashboard } from './dashboard.mjs'
 import * as herdr from './herdr.mjs'
+import * as playwright from './playwright.mjs'
 import * as task from './task.mjs'
 import { EnkiError, EXIT } from './task.mjs'
 import { writeRules } from './rules.mjs'
@@ -13,13 +20,17 @@ const USAGE = `enki: orchestration for Claude Code on herdr
 Setup     enki doctor | enki init | enki validate | enki skills [--available]
 Task      enki task new <slug> [--repo <name>]... | enki resume <slug> | enki status
 Team      enki team start | enki start <role>
-Work      enki ask <role> <brief-file> [--report <file>] [--step <name>] [--timeout <ms>]
+Work      enki ask <role> <brief-file> [--step <n>] [--report <file>] [--timeout <ms>]
+          enki step <n> todo|active|done|failed
           enki verify [--baseline] [--known-failures]
           enki wait <role> [--timeout <ms>] | enki read <role> [--lines <n>]
           enki answer <role> <option|trust> [--by user]
 Server    enki server start|stop|restart|status [--repo <name>]
+Memory    enki migrate --memory repo|private | enki memory sync | enki memory merge <slug>
 Progress  enki phase <name> | enki phase done --abandon | enki round next | enki rules
-Browser   enki browser acquire | enki browser release
+Dashboard enki dashboard [--open] | enki dashboard status|stop
+Browser   enki playwright status | enki playwright install [--browser]
+          enki browser acquire | enki browser release (chrome driver only)
 
 Add --task <slug> to act on a task other than the one bound to this pane.
 Exit codes: 0 ok, 1 failed, 2 usage, 3 blocked, 4 timeout, 5 busy, 6 stalled.`
@@ -40,6 +51,10 @@ const OPTIONS = {
   baseline: { type: 'boolean' },
   'known-failures': { type: 'boolean' },
   available: { type: 'boolean' },
+  memory: { type: 'string' },
+  browser: { type: 'boolean' },
+  open: { type: 'boolean' },
+  quiet: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
 }
 
@@ -89,8 +104,15 @@ async function doctor() {
   if (!root) add(false, 'Project config', 'no .enki/config.json: run /enki:init')
   else {
     try {
-      const config = loadConfig(root)
+      const config = loadProjectConfig(root)
       add(config.repos.length > 0, `Project config: ${config.repos.length} repo(s)`, config.repos.length > 0 ? '' : 'add repos to .enki/config.json')
+      const migrated = JSON.parse(readFileSync(join(root, '.enki', 'config.json'), 'utf8')).memory !== undefined
+      add(migrated, migrated ? `Memory: ${config.memory}` : 'Memory', migrated ? '' : 'old shared layout: run enki migrate --memory repo, or private for team repos')
+      for (const warning of task.portWarnings(config)) console.log(warning)
+      if (config.browser.driver === 'playwright' && config.repos.some(repo => repo.url)) {
+        const problem = playwright.playwrightProblem(config)
+        add(!problem, 'Playwright for QA', problem ?? '')
+      }
     } catch (error) {
       add(false, 'Project config', error.message)
     }
@@ -99,8 +121,36 @@ async function doctor() {
   return checks.every(check => check.ok) ? EXIT.ok : EXIT.failed
 }
 
+function openInBrowser(url) {
+  const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open'
+  try {
+    spawn(opener, [url], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref()
+  } catch {
+    // No opener: the URL is printed anyway.
+  }
+}
+
+/** Works from any folder: the dashboard covers every project, so it needs none. */
+async function dashboard(args, flags) {
+  if (args[0] === 'status') return console.log(await dashboardStatus())
+  if (args[0] === 'stop') return console.log(await stopDashboard())
+  if (args.length > 0) throw new EnkiError('Usage: enki dashboard [--open] | enki dashboard status|stop', EXIT.usage)
+  try {
+    const result = await ensureDashboard()
+    if (flags.quiet) return EXIT.ok
+    if (result.status === 'disabled') return console.log('The dashboard is turned off (ENKI_DASHBOARD=off).')
+    const said = { started: 'Started', updated: 'Updated and restarted', running: 'Running', starting: 'Starting' }[result.status]
+    console.log(`${said}: ${result.url}`)
+    if (flags.open) openInBrowser(result.url)
+  } catch (error) {
+    if (flags.quiet) return EXIT.failed
+    throw error
+  }
+}
+
 const commands = {
   help: () => console.log(USAGE),
+  dashboard,
   doctor,
   init() {
     const created = task.initProject(process.cwd())
@@ -108,9 +158,28 @@ const commands = {
   },
   validate() {
     const root = requireRoot()
-    const config = loadConfig(root)
+    const config = loadProjectConfig(root)
     if (config.repos.length > 0) task.skillsReport({ root })
-    console.log(`Valid: ${config.repos.length} repo(s), mode ${config.mode}, browser ${config.browser.driver}.`)
+    for (const warning of task.portWarnings(config)) console.log(warning)
+    for (const warning of config.warnings) console.log(`warning: ${warning}`)
+    console.log(`Valid: ${config.repos.length} repo(s), mode ${config.mode}, memory ${config.memory}, browser ${config.browser.driver}.`)
+  },
+  migrate(args, flags) {
+    console.log(migrate(requireRoot(), flags.memory).join('\n'))
+  },
+  memory(args) {
+    const root = requireRoot()
+    if (args[0] === 'sync') {
+      const { lines, blocked } = syncMemory(root)
+      console.log(lines.length > 0 ? lines.join('\n') : 'Memory is up to date.')
+      return blocked ? EXIT.failed : EXIT.ok
+    }
+    if (args[0] === 'merge' && args[1]) {
+      const { lines, blocked } = syncMemory(root, { only: args[1] })
+      console.log(lines.length > 0 ? lines.join('\n') : `No unmerged memory branch called ${args[1]}.`)
+      return blocked ? EXIT.failed : EXIT.ok
+    }
+    throw new EnkiError('Usage: enki memory sync | enki memory merge <slug>', EXIT.usage)
   },
   skills(args, flags) {
     const lines = task.skillsReport({ root: requireRoot(), available: flags.available })
@@ -138,7 +207,7 @@ const commands = {
   async ask(args, flags) {
     if (args.length !== 2) throw new EnkiError('Usage: enki ask <role> <brief-file>', EXIT.usage)
     return emitResult(
-      await task.ask({ root: requireRoot(), slug: flags.task, role: role(args[0]), briefPath: args[1], report: flags.report, step: flags.step, timeout: number(flags.timeout) }),
+      await task.ask({ root: requireRoot(), slug: flags.task, role: role(args[0]), briefPath: args[1], report: flags.report, step: flags.step === undefined ? undefined : number(flags.step), timeout: number(flags.timeout) }),
     )
   },
   async wait(args, flags) {
@@ -146,6 +215,10 @@ const commands = {
   },
   async read(args, flags) {
     console.log(await task.read({ root: requireRoot(), slug: flags.task, role: role(args[0]), lines: number(flags.lines) }))
+  },
+  step(args, flags) {
+    if (args.length !== 2) throw new EnkiError('Usage: enki step <n> todo|active|done|failed', EXIT.usage)
+    console.log(task.moveStep({ root: requireRoot(), slug: flags.task, n: number(args[0]), status: args[1] }))
   },
   async verify(args, flags) {
     return emitResult(
@@ -165,8 +238,8 @@ const commands = {
     console.log(await task.resume({ root: requireRoot(), slug: args[0] }))
   },
   async phase(args, flags) {
-    const { phase, servers } = await task.setPhase({ root: requireRoot(), slug: flags.task, phase: args[0], abandon: flags.abandon })
-    console.log([`Phase: ${phase}`, ...servers].join('\n'))
+    const { phase, notes } = await task.setPhase({ root: requireRoot(), slug: flags.task, phase: args[0], abandon: flags.abandon })
+    console.log([`Phase: ${phase}`, ...notes].join('\n'))
   },
   async server(args, flags) {
     if (!['start', 'stop', 'restart', 'status'].includes(args[0])) throw new EnkiError('Usage: enki server start|stop|restart|status [--repo <name>]', EXIT.usage)
@@ -182,8 +255,18 @@ const commands = {
     const current = resolveTask(root, { slug: flags.task })
     if (!current) throw new EnkiError('No task is bound to this pane.')
     const state = readState(current.taskDir)
-    writeRules(state, loadConfig(root))
+    writeRules(state, loadTaskConfig(state))
     console.log(`${state.taskDir}/rules.md`)
+  },
+  playwright(args, flags) {
+    const root = process.env.ENKI_PROJECT || findProjectRoot()
+    const config = root ? loadProjectConfig(root) : loadConfigDefaults()
+    if (args[0] === 'status') console.log(playwright.status(config).join('\n'))
+    else if (args[0] === 'install') {
+      console.log(playwright.install({ browser: flags.browser }).join('\n'))
+      const problem = playwright.playwrightProblem(config)
+      console.log(problem ? `Still needed: ${problem}` : 'Ready.')
+    } else throw new EnkiError('Usage: enki playwright status | enki playwright install [--browser]', EXIT.usage)
   },
   browser(args, flags) {
     const root = requireRoot()
@@ -219,7 +302,7 @@ export async function main(argv) {
       console.error(error.message)
       return error.exitCode
     }
-    if (error instanceof ConfigError || error instanceof herdr.HerdrError) {
+    if (error instanceof ConfigError || error instanceof herdr.HerdrError || error instanceof MemoryError || error instanceof DashboardError) {
       console.error(error.message)
       return EXIT.failed
     }

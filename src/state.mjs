@@ -90,7 +90,7 @@ export function readEvents(taskDir) {
   return readFileSync(path, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
 }
 
-export function createState({ taskDir, slug, projectId, projectRoot, repos, orchestratorPane }) {
+export function createState({ taskDir, slug, projectId, projectRoot, repos, orchestratorPane, worktrees = [], env = {} }) {
   const now = new Date().toISOString()
   const state = {
     v: STATE_VERSION,
@@ -106,12 +106,16 @@ export function createState({ taskDir, slug, projectId, projectRoot, repos, orch
     tests: true,
     qa: true,
     scope: [],
+    steps: null,
     verify: null,
     baselinePassed: null,
     treeSnapshot: null,
     round: 1,
     orchestratorPane,
     repos,
+    worktrees,
+    env,
+    database: null,
     herdr: { tab: null, panes: {} },
     agents: {},
     servers: {},

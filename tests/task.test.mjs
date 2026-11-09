@@ -42,7 +42,7 @@ test('each pane knows its role and task', () => {
 })
 
 test('workers launch with explicit models and permission mode, and only QA gets Chrome', () => {
-  const project = approved(makeProject())
+  const project = approved(makeProject({ browser: { driver: 'chrome' } }))
   assert.equal(project.enki(['team', 'start']).code, 0)
   const scout = launch(project, 'scout-demo')
   const coder = launch(project, 'coder-demo')
@@ -54,7 +54,7 @@ test('workers launch with explicit models and permission mode, and only QA gets 
     assert.equal(call[call.indexOf('--disallowedTools') + 1], 'AskUserQuestion,EnterPlanMode,ExitPlanMode')
     assert.ok(call.includes('--append-system-prompt-file'))
     assert.equal(call[call.indexOf('--add-dir') + 1], project.taskDir('demo'))
-    assert.deepEqual(JSON.parse(call[call.indexOf('--settings') + 1]).permissions.allow, [`Edit(/${project.taskDir('demo')}/**)`])
+    assert.equal(JSON.parse(call[call.indexOf('--settings') + 1]).permissions.allow[0], `Edit(/${project.taskDir('demo')}/**)`)
   }
   assert.equal(scout[scout.indexOf('--model') + 1], 'claude-haiku-5-5')
   assert.equal(coder[coder.indexOf('--model') + 1], 'claude-sonnet-5-5')
@@ -76,7 +76,7 @@ test('team models and permission mode come from config', () => {
 })
 
 test('the role file carries the QA browser notes and playbook sections', () => {
-  const project = makeProject()
+  const project = makeProject({ browser: { driver: 'chrome' } })
   writeFileSync(join(project.root, '.enki/playbook.md'), '## All\n\nShared rule XYZ.\n\n## QA\n\nQA rule ABC.\n\n## Coder\n\nCoder rule.\n')
   approved(project)
   project.enki(['team', 'start'])
@@ -304,9 +304,9 @@ test('a timeout reports status and does not resubmit', () => {
   assert.equal(project.herdr.calls('agent', 'prompt').length, 1)
 })
 
-test('step timeouts come from config', () => {
-  const project = started(makeProject({ timeouts: { baseline: 12345 } }))
-  project.enki(['ask', 'scout', project.brief(), '--step', 'baseline'])
+test('role timeouts come from config', () => {
+  const project = started(makeProject({ timeouts: { scout: 12345 } }))
+  project.enki(['ask', 'scout', project.brief()])
   const call = project.herdr.calls('agent', 'wait')[0]
   assert.equal(call[call.indexOf('--timeout') + 1], '12345')
 })
@@ -460,9 +460,9 @@ test('workers can look, but cannot run the task', () => {
 // Parallel tasks
 
 test('two orchestrators in one project each see only their own task', () => {
-  const project = makeProject()
-  assert.equal(project.enki(['task', 'new', 'one'], { HERDR_PANE_ID: 'w1:a' }).code, 0)
-  assert.equal(project.enki(['task', 'new', 'two'], { HERDR_PANE_ID: 'w1:b' }).code, 0)
+  const project = makeProject({ repos: [{ path: 'web', devServer: { managedBy: 'user' } }, { path: 'api', devServer: { managedBy: 'user' } }] })
+  assert.equal(project.enki(['task', 'new', 'one', '--repo', 'web'], { HERDR_PANE_ID: 'w1:a' }).code, 0)
+  assert.equal(project.enki(['task', 'new', 'two', '--repo', 'api'], { HERDR_PANE_ID: 'w1:b' }).code, 0)
   assert.match(project.enki(['status'], { HERDR_PANE_ID: 'w1:a' }).out, /-one /)
   assert.match(project.enki(['status'], { HERDR_PANE_ID: 'w1:b' }).out, /-two /)
   assert.notEqual(project.enki(['status'], { HERDR_PANE_ID: 'w1:c' }).code, 0)
@@ -471,10 +471,18 @@ test('two orchestrators in one project each see only their own task', () => {
   assert.equal(project.state('two').approved, false)
 })
 
-test('the browser lock is shared across tasks', () => {
+test('without worktrees, a second task on the same repo is refused', () => {
   const project = makeProject()
-  project.enki(['task', 'new', 'one'], { HERDR_PANE_ID: 'w1:a' })
-  project.enki(['task', 'new', 'two'], { HERDR_PANE_ID: 'w1:b' })
+  assert.equal(project.enki(['task', 'new', 'one'], { HERDR_PANE_ID: 'w1:a' }).code, 0)
+  const second = project.enki(['task', 'new', 'two'], { HERDR_PANE_ID: 'w1:b' })
+  assert.notEqual(second.code, 0)
+  assert.match(second.err, /share one tree/)
+})
+
+test('the browser lock is shared across tasks', () => {
+  const project = makeProject({ browser: { driver: 'chrome' }, repos: [{ path: 'web', devServer: { managedBy: 'user' } }, { path: 'api', devServer: { managedBy: 'user' } }] })
+  project.enki(['task', 'new', 'one', '--repo', 'web'], { HERDR_PANE_ID: 'w1:a' })
+  project.enki(['task', 'new', 'two', '--repo', 'api'], { HERDR_PANE_ID: 'w1:b' })
   assert.equal(project.enki(['browser', 'acquire'], { HERDR_PANE_ID: 'w1:a' }).code, 0)
   const second = project.enki(['browser', 'acquire'], { HERDR_PANE_ID: 'w1:b' })
   assert.equal(second.code, 5)

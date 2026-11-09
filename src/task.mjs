@@ -4,12 +4,18 @@ import { randomBytes } from 'node:crypto'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
-import { loadConfig, ROLES } from './config.mjs'
+import { ROLES } from './config.mjs'
+import { checkoutTaskMemory, finishTaskMemory, loadProjectConfig, loadTaskConfig, memoryMode, MemoryError, syncMemory, usesRepoMemory } from './memory.mjs'
 import { runChecks, snapshotTree } from './checks.mjs'
 import * as herdr from './herdr.mjs'
 import { HerdrError } from './herdr.mjs'
 import { pluginRoot } from './paths.mjs'
 import { availableSkills, resolveSkill, skillWarnings, SkillError } from './skills.mjs'
+import { mcpConfig, playwrightProblem } from './playwright.mjs'
+import { allocatePorts, releasePorts } from './ports.mjs'
+import { commitMessage, createWorktrees, finishWorktrees, git, installDependencies, worktreesDir, WorktreeError, writeEnvFiles } from './worktrees.mjs'
+import { ensureDashboard } from './dashboard.mjs'
+import { copyDatabase, DatabaseError, databaseEnv, dropDatabase, fill, taskToken } from './database.mjs'
 import { writeRoleFile, writeRules } from './rules.mjs'
 import { createState, enkiHome, listTasks, PHASES, readEvents, readState, recordEvent, registerProject, resolveTask, tasksDir, updateState, writeJsonAtomic } from './state.mjs'
 
@@ -58,12 +64,43 @@ function selectRepos(root, config, names) {
 }
 
 const workerEnv = (state, role) => ({
+  ...Object.assign({}, ...Object.values(state.env ?? {})),
   ENKI_ROLE: role,
   ENKI_TASK: state.taskDir,
   ENKI_PROJECT: state.projectRoot,
 })
 
-const teamCwd = state => (state.repos.length === 1 ? state.repos[0].workdir : state.projectRoot)
+const teamCwd = state => {
+  if (state.repos.length === 1) return state.repos[0].workdir
+  return state.worktrees?.length > 0 ? join(worktreesDir(state.projectRoot), state.slug) : state.projectRoot
+}
+
+/** A repo's worktree settings: the project's, with the repo's own on top. */
+const worktreeSettings = (config, repo) => {
+  const own = config.repos.find(item => item.name === repo.name)?.worktree ?? {}
+  return { ...config.worktree, ...own, env: { ...config.worktree.env, ...own.env } }
+}
+
+const portValues = state => ({ task: taskToken(state.slug), ports: Object.fromEntries(state.repos.filter(repo => repo.port).map(repo => [repo.name, repo.port])) })
+
+/** The env values a repo gets in this task: its worktree settings and the plan's database mode. */
+function repoEnv(state, config, repo) {
+  const values = { ...portValues(state), port: repo.port ?? undefined }
+  const env = {}
+  for (const [key, value] of Object.entries(worktreeSettings(config, repo).env)) env[key] = fill(value, values)
+  return { ...env, ...databaseEnv(config.database, state.database, values) }
+}
+
+function applyEnv(state, config) {
+  const env = {}
+  for (const repo of state.repos) {
+    env[repo.name] = repoEnv(state, config, repo)
+    writeEnvFiles(repo, env[repo.name])
+  }
+  return env
+}
+
+const asEnki = (error, Kind) => (error instanceof Kind ? new EnkiError(error.message) : error)
 
 /** Three columns: scout over coder, tester over QA, and a full-height reviewer. */
 async function buildGrid(state) {
@@ -91,6 +128,9 @@ async function verifyGrid(rootPane, panes) {
     reviewer.y === scout.y && reviewer.height > scout.height
   if (!isGrid) throw new EnkiError(`The task tab is not the expected three-column grid: ${JSON.stringify(layout)}`)
 }
+
+/** Playwright needs a page to open: a task with no local URL has nothing for it. */
+const usesPlaywright = (state, config) => config.browser.driver === 'playwright' && state.repos.some(repo => repo.url)
 
 const skillContext = (root, repos) => ({ root, workdirs: repos.map(repo => repo.workdir) })
 
@@ -127,8 +167,19 @@ function workerArgs(state, config, role) {
     // Reports shouldn't need a prompt each time. The policy hook still limits which files.
     '--settings', JSON.stringify({ permissions: { allow: [`Edit(/${state.taskDir}/**)`] } }),
   ]
-  // Only QA gets the browser.
+  // Only QA gets a browser.
   if (role === 'qa' && config.browser.driver === 'chrome') args.push('--chrome')
+  if (role === 'qa' && usesPlaywright(state, config)) {
+    const path = join(state.taskDir, 'mcp-qa.json')
+    const origins = state.repos.filter(repo => repo.url).map(repo => new URL(repo.url).origin)
+    writeJsonAtomic(path, mcpConfig({ config, origins, outputDir: join(state.taskDir, 'qa-evidence') }))
+    // Only the browser: QA has no use for the user's other MCP servers.
+    args.push('--mcp-config', path, '--strict-mcp-config')
+    const settings = args.indexOf('--settings') + 1
+    const parsed = JSON.parse(args[settings])
+    parsed.permissions.allow.push('mcp__playwright')
+    args[settings] = JSON.stringify(parsed)
+  }
   if (process.env.ENKI_DEV_PLUGIN_DIR) args.push('--plugin-dir', process.env.ENKI_DEV_PLUGIN_DIR)
   return args
 }
@@ -145,7 +196,7 @@ async function waitForHookReady(taskDir, role, since) {
 /** Idempotent, so it can be run again after the user answers a startup prompt in the pane. */
 export async function startRole(taskDir, role) {
   const state = readState(taskDir)
-  const config = loadConfig(state.projectRoot)
+  const config = loadTaskConfig(state)
   const name = agentName(role, state.slug)
   const pane = state.herdr.panes[role]
   if (!pane) throw new EnkiError(`No pane recorded for ${role}.`)
@@ -177,30 +228,92 @@ export async function startRole(taskDir, role) {
       `${name} started, but the enki hooks did not report from it, so its rules would not be enforced. Install enki at user scope (claude plugin install enki@enki-plugins --scope user), then run: enki start ${role}`,
     )
   }
+  // The Claude session behind the agent: its transcript is where its token use is recorded.
+  const session = (await herdr.getAgent(name).catch(() => null))?.agent_session?.value ?? null
   updateState(taskDir, current => {
-    current.agents[role] = { name, pane, startedAt: new Date().toISOString() }
+    current.agents[role] = { name, pane, session, startedAt: new Date().toISOString() }
   })
-  recordEvent(taskDir, 'agent.started', { role, name, pane })
+  recordEvent(taskDir, 'agent.started', { role, name, pane, session })
   return name
 }
 
 export async function newTask({ root, slug, repoNames = [] }) {
   requireHerdr()
   if (!SLUG.test(slug)) throw new EnkiError('The slug must be short kebab-case: a lowercase letter, then letters, digits or hyphens, at most 23 characters.', EXIT.usage)
-  const config = loadConfig(root)
+  const config = loadProjectConfig(root)
   const existing = listTasks(root).find(task => task.slug === slug && task.phase !== 'done')
   if (existing) throw new EnkiError(`Task "${slug}" is already open: ${existing.taskDir}. Use: enki resume ${slug}`)
 
-  const repos = selectRepos(root, config, repoNames)
+  let repos = selectRepos(root, config, repoNames)
   resolveTeamSkills(root, config, repos) // Fails here, before any tab opens.
   const projectId = ensureProjectId(root, config)
   const taskDir = join(tasksDir(root), `${today()}-${slug}`)
   if (existsSync(taskDir)) throw new EnkiError(`${taskDir} already exists. Pick a different slug.`)
+  if (!config.worktrees) {
+    const clash = listTasks(root).find(task => task.phase !== 'done' && task.repos.some(repo => repos.some(item => item.name === repo.name)))
+    if (clash) throw new EnkiError(`Task ${clash.slug} is still open on the same repo, and without worktrees, tasks share one tree. Finish it first, or turn on "worktrees".`)
+  }
 
-  const state = createState({ taskDir, slug, projectId, projectRoot: root, repos, orchestratorPane: process.env.HERDR_PANE_ID ?? null })
+  const privateMemory = memoryMode(root) === 'private'
+  const memoryNotes = []
+  if (privateMemory) {
+    // Memory for the base branch has to include every task merged into it, before this one starts from it.
+    const synced = syncMemory(root)
+    if (synced.blocked) throw new EnkiError(synced.lines.join('\n'))
+    memoryNotes.push(...synced.lines)
+  }
+  let worktrees = []
+  if (config.worktrees) {
+    try {
+      ;({ repos, worktrees } = createWorktrees({ root, repos, slug, settingsFor: repo => worktreeSettings(config, repo) }))
+    } catch (error) {
+      throw asEnki(error, WorktreeError)
+    }
+  }
+  try {
+    repos = repos.map(repo => {
+      // An unmigrated project keeps writing the old shared notes, never into the code repo.
+      if (!privateMemory) return usesRepoMemory(root, repo) ? { ...repo, memoryDir: join(repo.workdir, '.enki') } : repo
+      const tree = worktrees.find(item => item.path === repo.worktree)
+      const { path, note } = checkoutTaskMemory({ root, slug, repo, baseBranch: tree.base.branch })
+      if (note) memoryNotes.push(note)
+      return { ...repo, memoryDir: path }
+    })
+  } catch (error) {
+    for (const tree of worktrees) {
+      git(tree.top, ['worktree', 'remove', '--force', tree.path], { allowFail: true })
+      git(tree.top, ['branch', '-D', tree.branch], { allowFail: true })
+    }
+    throw asEnki(error, MemoryError)
+  }
+  let ports = {}
+  try {
+    const managed = repos.filter(repo => repo.url && sourceRepo(config, repo).devServer.managedBy === 'enki').map(repo => repo.name)
+    if (managed.length > 0) ports = await allocatePorts({ taskDir, names: managed, ...config.ports })
+  } catch (error) {
+    for (const tree of worktrees) {
+      git(tree.top, ['worktree', 'remove', '--force', tree.path], { allowFail: true })
+      git(tree.top, ['branch', '-D', tree.branch], { allowFail: true })
+    }
+    throw new EnkiError(error.message)
+  }
+  repos = repos.map(repo => {
+    if (!ports[repo.name]) return repo
+    const url = new URL(repo.url)
+    url.port = String(ports[repo.name])
+    return { ...repo, url: url.toString(), port: ports[repo.name] }
+  })
+
+  const draft = { slug, repos, database: null }
+  const env = applyEnv(draft, config)
+  const state = createState({ taskDir, slug, projectId, projectRoot: root, repos, worktrees, env, orchestratorPane: process.env.HERDR_PANE_ID ?? null })
   registerProject({ id: projectId, root })
   writeRules(state, config)
-  recordEvent(taskDir, 'task.created', { slug, repos: repos.map(repo => repo.name) })
+  recordEvent(taskDir, 'task.created', { slug, repos: repos.map(repo => repo.name), worktrees: worktrees.map(tree => ({ path: tree.path, branch: tree.branch, base: tree.base })), ports, memory: memoryNotes })
+  // The orchestrator's own Claude session, so the dashboard can count its tokens too.
+  const orchestrator = state.orchestratorPane && (await herdr.listAgents().catch(() => [])).find(agent => agent.pane_id === state.orchestratorPane)
+  if (orchestrator?.agent_session?.value) recordEvent(taskDir, 'orchestrator.session', { session: orchestrator.agent_session.value })
+  ensureDashboard({ wait: false }).catch(() => {})
 
   const grid = await buildGrid(state)
   updateState(taskDir, current => {
@@ -223,7 +336,7 @@ export async function teamStart({ root, slug }) {
   if (!task.approved) {
     throw new EnkiError(`The plan isn't approved (phase: ${task.phase}). Present it with ExitPlanMode first. Coder, tester and reviewer can't start until then.`)
   }
-  const config = loadConfig(task.projectRoot)
+  const config = loadTaskConfig(task)
   const unknown = !task.qa ? [] : serverRepos(task).filter(repo => {
     const source = sourceRepo(config, repo)
     return source.devServer.managedBy === 'enki' && !source.devServer.start
@@ -231,7 +344,15 @@ export async function teamStart({ root, slug }) {
   if (unknown.length > 0) {
     throw new EnkiError(`Nobody has recorded how to start ${unknown.map(repo => repo.name).join(', ')}. Find the command from the scout report, add it as devServer.start in .enki/config.json, then run this again.`)
   }
+  if (Array.isArray(task.steps) && task.steps.length === 0) {
+    throw new EnkiError('The approved plan has no steps, so nobody can follow it and the dashboard has nothing to show. Run enki phase planning, add a Steps list ("1. [Coder] ...", one owner per step) and present the plan again.')
+  }
+  await prepareWorktreeForTeam(task, config)
   const roles = ['coder', 'tester', ...(task.qa === false ? [] : ['qa']), 'reviewer']
+  if (task.qa !== false && usesPlaywright(task, config)) {
+    const problem = playwrightProblem(config)
+    if (problem) throw new EnkiError(problem)
+  }
   const results = await Promise.allSettled(roles.map(role => startRole(task.taskDir, role)))
   const failure = results.find(result => result.status === 'rejected')
   if (failure) throw failure.reason
@@ -242,6 +363,42 @@ export async function teamStart({ root, slug }) {
     current.treeSnapshot ??= snapshotTree(current.repos)
   })
   return { roles, started }
+}
+
+/** Approval-time work: a real install for `Scope: deps`, and the plan's database copy. Safe to repeat. */
+async function prepareWorktreeForTeam(task, config) {
+  if (task.scope.includes('deps') && task.worktrees?.length > 0 && !task.depsInstalled) {
+    for (const repo of task.repos) {
+      if ((repo.linked ?? []).length === 0) continue
+      const { install } = worktreeSettings(config, repo)
+      if (!install) throw new EnkiError(`The plan changes dependencies, so ${repo.name} needs its own install, but worktree.install isn't set in .enki/config.json.`)
+      try {
+        installDependencies(repo, install)
+      } catch (error) {
+        throw new EnkiError(`"${install}" failed in ${repo.workdir}: ${String(error.stderr || error.message).trim().slice(0, 600)}`)
+      }
+    }
+    updateState(task.taskDir, current => {
+      current.depsInstalled = true
+      current.repos = current.repos.map(repo => ({ ...repo, linked: [] }))
+    })
+    recordEvent(task.taskDir, 'worktree.installed')
+  }
+  if (task.database === 'copy' && !task.databaseReady) {
+    try {
+      copyDatabase(config.database, portValues(task), task.projectRoot)
+    } catch (error) {
+      throw asEnki(error, DatabaseError)
+    }
+    updateState(task.taskDir, current => {
+      current.databaseReady = true
+    })
+    recordEvent(task.taskDir, 'database.copied')
+  }
+  // The plan's database mode is known now, so the env values are final.
+  updateState(task.taskDir, current => {
+    current.env = applyEnv(current, config)
+  })
 }
 
 const hasReport = (task, name) => existsSync(join(task.taskDir, name))
@@ -334,11 +491,70 @@ async function finishWait(state, role, name, timeout, tail) {
   if (status === 'blocked') return blockedResult(state, role, name)
   const output = await herdr.readAgent(name, tail)
   recordEvent(state.taskDir, 'agent.finished', { role, name, status })
+  finishStep(state.taskDir, role)
   return { exitCode: EXIT.ok, status, output: output.trimEnd() }
 }
 
-function timeoutFor(config, role, step) {
-  return config.timeouts[step ?? role] ?? config.timeouts[role]
+const timeoutFor = (config, role) => config.timeouts[role]
+
+// Plan steps: the orchestrator writes them, each with an owner, and they move with the work.
+export const STEP_OWNERS = { orchestrator: 'orchestrator', scout: 'scout', coder: 'coder', tester: 'tester', qa: 'qa', reviewer: 'reviewer' }
+export const STEP_STATUSES = ['todo', 'active', 'done', 'failed']
+const STEP_LINE = /^\s*(\d+)[.)]\s*\[(orchestrator|scout|coder|tester|qa|reviewer)\]\s*(.+?)\s*$/i
+
+/** "1. [Coder] Rewrite the intent flow" lines from the approved plan. */
+export function parseSteps(plan) {
+  return plan
+    .split('\n')
+    .map(line => STEP_LINE.exec(line))
+    .filter(Boolean)
+    .map(match => ({ n: Number(match[1]), owner: match[2].toLowerCase(), text: match[3], status: 'todo' }))
+}
+
+/** The roles whose briefs must name a step, once a plan has them. */
+const STEP_ROLES = new Set(['coder', 'tester', 'qa', 'reviewer'])
+
+function setStep(taskDir, n, status, by) {
+  const next = updateState(taskDir, current => {
+    const step = current.steps?.find(item => item.n === n)
+    if (step) step.status = status
+  })
+  const step = next.steps?.find(item => item.n === n)
+  if (step) recordEvent(taskDir, 'step.status', { n, status, owner: step.owner, text: step.text, by })
+  return step
+}
+
+/** When an agent reports, the step it was sent for is done. */
+function finishStep(taskDir, role) {
+  const state = readState(taskDir)
+  const n = state.agents?.[role]?.step
+  const step = state.steps?.find(item => item.n === n)
+  if (step && step.status === 'active') setStep(taskDir, n, 'done', role)
+}
+
+export function moveStep({ root, slug, n, status }) {
+  if (!STEP_STATUSES.includes(status)) throw new EnkiError(`A step can be: ${STEP_STATUSES.join(', ')}`, EXIT.usage)
+  const task = requireTask(root, slug)
+  const step = task.steps?.find(item => item.n === n)
+  if (!step) throw new EnkiError(`The plan has no step ${n}.`, EXIT.usage)
+  setStep(task.taskDir, n, status, 'orchestrator')
+  return `Step ${n} (${step.owner}: ${step.text}) is now ${status}.`
+}
+
+/** Checks the step a brief is for, and marks it active. */
+function startStep(task, role, step) {
+  const planned = (task.steps ?? []).length > 0
+  if (step === undefined) {
+    if (planned && STEP_ROLES.has(role)) throw new EnkiError(`Name the plan step this brief is for: enki ask ${role} <brief> --step N. Steps for the ${role}: ${task.steps.filter(item => item.owner === role).map(item => item.n).join(', ') || 'none'}.`, EXIT.usage)
+    return
+  }
+  const found = task.steps?.find(item => item.n === step)
+  if (!found) throw new EnkiError(`The plan has no step ${step}.`, EXIT.usage)
+  if (found.owner !== role) throw new EnkiError(`Step ${step} belongs to the ${found.owner}, not the ${role}.`, EXIT.usage)
+  updateState(task.taskDir, current => {
+    current.agents[role].step = step
+  })
+  setStep(task.taskDir, step, 'active', role)
 }
 
 export async function ask({ root, slug, role, briefPath, report, step, timeout }) {
@@ -346,7 +562,7 @@ export async function ask({ root, slug, role, briefPath, report, step, timeout }
   if (!ROLES.includes(role)) throw new EnkiError(`Unknown role "${role}".`, EXIT.usage)
   if (!existsSync(briefPath)) throw new EnkiError(`No brief at ${briefPath}.`, EXIT.usage)
   const task = requireTask(root, slug)
-  const config = loadConfig(task.projectRoot)
+  const config = loadTaskConfig(task)
   if (role !== 'scout' && !task.approved) throw new EnkiError(`The ${role} can't work until the plan is approved.`)
   const name = task.agents[role]?.name
   if (!name) throw new EnkiError(`The ${role} isn't started. Use: enki team start`)
@@ -358,6 +574,7 @@ export async function ask({ root, slug, role, briefPath, report, step, timeout }
     throw new EnkiError(`${name} is still working. Use: enki wait ${role}`, EXIT.busy)
   }
   await checkGates(task, role)
+  startStep(task, role, step)
   // New code or new tests mean the last test result no longer says anything.
   if (role === 'coder' || role === 'tester') {
     updateState(task.taskDir, current => {
@@ -389,12 +606,12 @@ export async function ask({ root, slug, role, briefPath, report, step, timeout }
     }
   }
   if (seen === 'blocked') return blockedResult(task, role, name)
-  return finishWait(task, role, name, timeout ?? timeoutFor(config, role, step), 40)
+  return finishWait(task, role, name, timeout ?? timeoutFor(config, role), 40)
 }
 
 export async function wait({ root, slug, role, timeout }) {
   const task = requireTask(root, slug)
-  const config = loadConfig(task.projectRoot)
+  const config = loadTaskConfig(task)
   const name = task.agents[role]?.name
   if (!name) throw new EnkiError(`The ${role} isn't started.`)
   const limit = timeout ?? timeoutFor(config, role)
@@ -471,7 +688,7 @@ export async function read({ root, slug, role, lines = 40 }) {
 /** Runs the tests without an agent: no tokens, and a result nobody can misreport. */
 export async function verify({ root, slug, baseline = false, knownFailures = false, timeout }) {
   const task = requireTask(root, slug)
-  const config = loadConfig(task.projectRoot)
+  const config = loadTaskConfig(task)
   if (!baseline && task.approved) {
     for (const role of ['coder', 'tester']) {
       if (await isWorking(task, role)) throw new EnkiError(`The ${role} is still working, so a test run now wouldn't mean anything. Run enki verify when it reports.`, EXIT.busy)
@@ -481,6 +698,7 @@ export async function verify({ root, slug, baseline = false, knownFailures = fal
   const results = await runChecks({
     repos: task.repos,
     config,
+    envFor: repo => task.env?.[repo.name] ?? {},
     taskDir: task.taskDir,
     label: baseline ? 'baseline' : `r${task.round}`,
     timeout: timeout ?? (baseline ? config.timeouts.baseline : config.timeouts.verify),
@@ -519,6 +737,28 @@ async function runStopCommand(devServer, repo) {
   }
 }
 
+const PORT_FORMS = [
+  'Vite: npm run dev -- --port {port} --strictPort',
+  'Next.js: npm run dev -- -p {port}',
+  'Django: python manage.py runserver {port}',
+  'Rails: bin/rails server -p {port}',
+]
+
+function portHint(name, port) {
+  return [
+    `Each task gives its server its own port (${port} here), and this start command has no {port} in it. Unless the app reads the PORT variable, it is listening somewhere else.`,
+    `Put {port} in devServer.start for ${name}, in the form its tool expects:`,
+    ...PORT_FORMS.map(form => `  ${form}`),
+  ].join('\n')
+}
+
+/** Servers enki starts whose command doesn't take the task's port. Fine only if the app reads PORT. */
+export function portWarnings(config) {
+  return config.repos
+    .filter(repo => repo.url && repo.devServer.managedBy === 'enki' && repo.devServer.start && !repo.devServer.start.includes('{port}'))
+    .map(repo => `warning: ${repo.name}: devServer.start has no {port}. Each task runs its server on its own port, so this only works if the app reads the PORT variable. Otherwise use a form like: ${PORT_FORMS[0].split(': ')[1]}`)
+}
+
 const responds = url =>
   fetch(url, { signal: AbortSignal.timeout(2000), redirect: 'manual' }).then(
     () => true,
@@ -555,14 +795,18 @@ async function startServer(task, config, repo) {
   })
   // Panes run the user's login shell, which may be fish. A script keeps the command in plain sh.
   const script = join(task.taskDir, `server-${repo.name.replaceAll('/', '-')}.sh`)
-  writeFileSync(script, `${devServer.start}\n`)
+  const env = { ...(repo.port ? { PORT: String(repo.port) } : {}), ...task.env?.[repo.name] }
+  const exports = Object.entries(env).map(([key, value]) => `export ${key}='${String(value).replaceAll("'", "'\\''")}'`)
+  const command = repo.port ? fill(devServer.start, { ...portValues(task), port: repo.port }) : devServer.start
+  writeFileSync(script, `${[...exports, command].join('\n')}\n`)
   await herdr.runInPane(rootPane, `sh '${script}'`)
   if (!(await poll(() => responds(repo.url), config.timeouts.server))) {
     const log = await herdr.readPane(rootPane).catch(() => '')
     await herdr.closeTab(tabId).catch(() => {})
     await runStopCommand(devServer, repo) // Clears anything a partial start left behind.
     recordEvent(task.taskDir, 'server.failed', { repo: repo.name, command: devServer.start })
-    throw new EnkiError(`"${devServer.start}" didn't bring ${repo.name} up at ${repo.url} within ${config.timeouts.server} ms. If the command or URL is wrong, correct .enki/config.json and the repo notes.\n\n--- server output ---\n${log.trimEnd()}`)
+    const hint = repo.port && !devServer.start.includes('{port}') ? `\n\n${portHint(repo.name, repo.port)}` : ''
+    throw new EnkiError(`"${devServer.start}" didn't bring ${repo.name} up at ${repo.url} within ${config.timeouts.server} ms. If the command or URL is wrong, correct .enki/config.json and the repo notes.${hint}\n\n--- server output ---\n${log.trimEnd()}`)
   }
   updateState(task.taskDir, current => {
     current.servers = { ...current.servers, [repo.name]: { tab: tabId, pane: rootPane, startedAt: new Date().toISOString() } }
@@ -595,7 +839,7 @@ async function stopServer(task, config, repo) {
 export async function serverCommand({ root, slug, action, repoName }) {
   requireHerdr()
   const task = requireTask(root, slug)
-  const config = loadConfig(task.projectRoot)
+  const config = loadTaskConfig(task)
   let repos = serverRepos(task)
   if (repoName) repos = repos.filter(repo => repo.name === repoName)
   if (repoName && repos.length === 0) throw new EnkiError(`No repo "${repoName}" with a URL in this task.`, EXIT.usage)
@@ -646,7 +890,10 @@ export async function status({ root, slug }) {
   return [
     `Task ${task.id}  phase: ${task.phase}  approved: ${task.approved}  round: ${task.round}`,
     `Folder: ${task.taskDir}`,
-    `Scope: ${task.scope.join(', ') || 'none'}  Repos: ${task.repos.map(repo => repo.name).join(', ')}`,
+    `Scope: ${task.scope.join(', ') || 'none'}  Repos: ${task.repos.map(repo => `${repo.name}${repo.url ? ` (${repo.url})` : ''}`).join(', ')}`,
+    ...(task.worktrees ?? []).map(tree => `Branch: ${tree.branch}, from ${tree.base.branch}, in ${tree.path}`),
+    ...task.repos.filter(repo => repo.memoryDir).map(repo => `Memory for ${repo.name}: ${repo.memoryDir}`),
+    ...(task.database ? [`Database: ${task.database}`] : []),
     `Tests this round: ${currentVerify(task) ? (task.verify.passed ? 'passed' : task.verify.accepted ? 'accepted' : 'failed') : 'not run'}`,
     ...(await agentSummary(task)),
     `Next: ${NEXT_STEP[task.phase]}`,
@@ -673,28 +920,90 @@ export async function setPhase({ root, slug, phase, abandon = false }) {
   if (phase === 'approved') throw new EnkiError('Only the user can approve a plan, through ExitPlanMode.')
   const task = requireTask(root, slug)
   const toPlanning = PHASES.indexOf(phase) <= PHASES.indexOf('planning')
-  if (!toPlanning && !task.approved) throw new EnkiError(`Can't move to ${phase}: the plan isn't approved.`)
+  if (!toPlanning && !task.approved && !abandon) throw new EnkiError(`Can't move to ${phase}: the plan isn't approved.`)
   if (phase === 'planning' && !existsSync(join(task.taskDir, 'scout.md'))) {
     throw new EnkiError('There is no scout report yet. Every task, however small, starts with: enki ask scout <brief>')
   }
   if (abandon && phase !== 'done') throw new EnkiError('--abandon only works with: enki phase done --abandon', EXIT.usage)
-  if (abandon) recordEvent(task.taskDir, 'task.abandoned', { from: task.phase, missing: missingChecks(task) })
-  else if (PHASES.indexOf(phase) >= PHASES.indexOf('notes')) {
+  if (!abandon && PHASES.indexOf(phase) >= PHASES.indexOf('notes')) {
     const missing = missingChecks(task)
     if (missing.length > 0) throw new EnkiError(`This task can't finish yet. Still needed: ${missing.join('; ')}.`)
   }
+  // Finishing commits the work first. If that fails, the task isn't done, and stays as it was.
+  const notes = phase === 'done' ? await finishTask(task, abandon) : []
+  if (abandon) recordEvent(task.taskDir, 'task.abandoned', { from: task.phase, missing: missingChecks(task) })
   updateState(task.taskDir, current => {
     current.phase = phase
     // Replanning withdraws the approval: the new plan needs its own.
     if (toPlanning) current.approved = false
   })
   recordEvent(task.taskDir, 'task.phase', { from: task.phase, to: phase })
-  if (phase !== 'done') return { phase, servers: [] }
-  return { phase, servers: await serverCleanup(task) }
+  // A finished task has done the orchestrator's own steps (notes, the report), whether or not it ticked them.
+  if (phase === 'done' && !abandon) {
+    for (const step of task.steps ?? []) {
+      if (step.owner === 'orchestrator' && step.status !== 'done' && step.status !== 'failed') setStep(task.taskDir, step.n, 'done', 'orchestrator')
+    }
+  }
+  return { phase, notes }
+}
+
+/** Stops what the task started, commits its worktrees to their branch, and frees its port and database. */
+async function finishTask(task, abandon) {
+  const config = loadTaskConfig(task)
+  const notes = await serverCleanup(task)
+  if (task.worktrees?.length > 0) {
+    const requirementsPath = join(task.taskDir, 'requirements.md')
+    const message = commitMessage({ slug: task.slug, id: task.id, requirements: existsSync(requirementsPath) ? readFileSync(requirementsPath, 'utf8') : null, abandon })
+    let results
+    try {
+      results = finishWorktrees({ worktrees: task.worktrees, repos: task.repos, message, abandon })
+    } catch (error) {
+      recordEvent(task.taskDir, 'worktree.commit_failed', { message: error.message.slice(0, 300) })
+      throw asEnki(error, WorktreeError)
+    }
+    if (memoryMode(task.projectRoot) === 'private') {
+      for (const repo of task.repos) {
+        const tree = results.find(item => item.path === repo.worktree) ?? task.worktrees.find(item => item.path === repo.worktree)
+        try {
+          const line = finishTaskMemory({
+            root: task.projectRoot,
+            slug: task.slug,
+            repo,
+            codeCommit: tree?.committed ? tree.fullCommit : null,
+            codeTop: tree?.top ?? repo.main,
+            baseBranch: tree?.base.branch,
+            message,
+            abandon,
+          })
+          if (line) notes.push(line)
+        } catch (error) {
+          notes.push(`${repo.name}: memory wasn't saved: ${error.message}`)
+        }
+      }
+    }
+    for (const tree of results) {
+      notes.push(
+        tree.committed
+          ? `Committed ${tree.files} file(s) to branch ${tree.branch} (${tree.commit}), from ${tree.base.branch}. Review with: git diff ${tree.base.branch}...${tree.branch}`
+          : `Nothing changed, so branch ${tree.branch} was deleted.`,
+      )
+    }
+    recordEvent(task.taskDir, 'worktree.finished', { results: results.map(tree => ({ branch: tree.branch, committed: tree.committed, commit: tree.commit ?? null })) })
+  }
+  if (task.databaseReady) {
+    try {
+      dropDatabase(config.database, portValues(task), task.projectRoot)
+      notes.push('Dropped the task\'s database copy.')
+    } catch (error) {
+      notes.push(`The database copy wasn't dropped: ${error.message}`)
+    }
+  }
+  await releasePorts(task.taskDir)
+  return notes
 }
 
 async function serverCleanup(task) {
-  const config = loadConfig(task.projectRoot)
+  const config = loadTaskConfig(task)
   const lines = []
   for (const repo of serverRepos(task)) {
     if (task.servers?.[repo.name]) lines.push(await stopServer(task, config, repo))
@@ -704,7 +1013,7 @@ async function serverCleanup(task) {
 
 export function nextRound({ root, slug }) {
   const task = requireTask(root, slug)
-  const config = loadConfig(task.projectRoot)
+  const config = loadTaskConfig(task)
   const fixRounds = task.round - 1
   if (fixRounds >= config.maxFixRounds) {
     recordEvent(task.taskDir, 'task.round_limit', { round: task.round })
@@ -718,6 +1027,7 @@ export function nextRound({ root, slug }) {
 }
 
 export const readApprovedScope = plan => ({
+  database: /^\W*Database:\W*(copy|shared|none)\b/im.exec(plan)?.[1].toLowerCase() ?? null,
   scope: [...plan.matchAll(/^\W*Scope:\s*([a-z-]+)/gim)].map(match => match[1].toLowerCase()),
   tests: !/^\W*Tests:\W*none\b/im.test(plan),
   qa: !/^\W*QA:\W*none\b/im.test(plan),
@@ -725,26 +1035,35 @@ export const readApprovedScope = plan => ({
 
 /** Called only by the ExitPlanMode hook, which only fires after the user approves. */
 export function approvePlan(task, planText) {
-  const { scope, tests, qa } = readApprovedScope(planText)
+  const { scope, tests, qa, database } = readApprovedScope(planText)
+  const steps = parseSteps(planText)
   writeFileSync(join(task.taskDir, 'approved-plan.md'), planText)
+  const hasDatabase = Boolean(loadTaskConfig(task).database)
   const next = updateState(task.taskDir, current => {
+    // Without a Database line, a task gets its own copy: the safe choice.
+    current.database = hasDatabase ? (database ?? 'copy') : null
     current.phase = 'approved'
     current.approved = true
     current.scope = scope
     current.tests = tests
     current.qa = qa
+    current.steps = steps
   })
-  const config = loadConfig(next.projectRoot)
+  const config = loadTaskConfig(next)
   writeRules(next, config)
-  recordEvent(task.taskDir, 'plan.approved', { scope, tests, qa })
-  return next
+  recordEvent(task.taskDir, 'plan.approved', { scope, tests, qa, database: next.database, steps: steps.length })
+  // The scout reports before the plan exists, so its steps are already done when the plan is approved.
+  if (existsSync(join(task.taskDir, 'scout.md'))) {
+    for (const step of steps.filter(item => item.owner === 'scout')) setStep(task.taskDir, step.n, 'done', 'scout')
+  }
+  return readState(task.taskDir)
 }
 
 const browserLock = () => join(enkiHome(), 'browser.lock')
 
 export function browserAcquire({ root, slug }) {
   const task = requireTask(root, slug)
-  if (loadConfig(task.projectRoot).browser.driver !== 'chrome') return 'This browser driver needs no lock.'
+  if (loadTaskConfig(task).browser.driver !== 'chrome') return 'This browser driver needs no lock.'
   mkdirSync(enkiHome(), { recursive: true })
   try {
     const fd = openSync(browserLock(), 'wx')
@@ -772,7 +1091,7 @@ export function browserRelease({ root, slug }) {
 
 /** What each role loads, or everything that could be listed. */
 export function skillsReport({ root, available = false }) {
-  const config = loadConfig(root)
+  const config = loadProjectConfig(root)
   const repos = selectRepos(root, config, [])
   if (available) {
     return availableSkills(skillContext(root, repos)).map(skill => `${skill.name}  ${skill.description.slice(0, 70)}`)
@@ -806,7 +1125,7 @@ export function initProject(root) {
     }
   }
   write('config.json', `${JSON.stringify({ id: randomBytes(6).toString('hex'), ...INIT_CONFIG }, null, 2)}\n`)
-  write('.gitignore', 'tasks/\n')
+  write('.gitignore', 'tasks/\nworktrees/\n')
   write('playbook.md', readFileSync(join(pluginRoot, 'templates', 'playbook.md'), 'utf8'))
   return created
 }

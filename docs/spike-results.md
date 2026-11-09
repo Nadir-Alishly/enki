@@ -120,3 +120,60 @@ So workers start with `--disable-slash-commands`, and enki finds each listed `SK
 A live scout listed only its two configured skills, a project skill and a 28 KB plugin skill, and could use both. Real data also exposed a stray file in the synced skills folder, which is now skipped.
 
 Not yet seen live: a skill's supporting files in use, and QA using Chrome with skills off. The Chrome tools were confirmed present, not exercised.
+
+## Playwright for QA
+
+The user asked for manual testing through Playwright instead of the Chrome extension, and chose MCP tools, a system browser first with download only as a fallback, headless runs, and no login support for now.
+
+- `@playwright/mcp` 0.0.83 is pinned, the newest release at least two weeks old when chosen. It installs into `~/.enki/playwright` with `--ignore-scripts`: 3 packages, 19 MB.
+- QA gets only this MCP server (`--strict-mcp-config`), headless and isolated, with its output folder in the task and `--allowed-origins` set to the project's local URLs.
+- Playwright's help says `--allowed-origins` is not a security boundary, and the README says so too.
+
+Verified live with a Haiku QA worker, using the real install and the system Chromium 152: QA started the server, opened the page through Playwright, saved a 1280×720 screenshot to `qa-evidence/`, and `example.com` was refused with `ERR_BLOCKED_BY_CLIENT`. No Playwright or browser processes were left after the task tab closed.
+
+Not yet tested live: `enki playwright install --browser`, which downloads Chromium, a visible window with `headless: false`, and several tasks testing at once.
+
+## Worktrees for parallel tasks
+
+Phase 0, checked with real git, real herdr and test-website's own stack:
+
+| Check | Result |
+|---|---|
+| Worktree nested under `.enki/worktrees` | Works, and stays out of the main tree's `git status` |
+| Folder trust for a worker in the worktree | No prompt: it inherits the project's trust |
+| Vite and Vitest with a linked `node_modules` | All 252 of test-website's tests passed, and the dev server served the app and its dependencies |
+| `git worktree remove` | Refuses uncommitted changes, but ignored files don't block it once the work is committed |
+| Unstaging copies at commit time | Doesn't work: git refuses to name ignored paths. Enki deletes its copies and links before staging instead |
+| A `node_modules/` rule with a trailing slash | Doesn't cover a symlink, so git sees it. Deleting links before staging handles this |
+
+Real git also exposed three bugs the first test run caught: git output was trimmed so the first dirty path lost a character, the database URL was written before the plan chose a mode, and a task couldn't be abandoned before approval.
+
+Not yet seen live: two orchestrated tasks running in one repo with real agents, and a real database. The scratch folder used for live tests was removed between sessions.
+
+## Repo memory
+
+A repo's notes, commands (`repo.json`) and playbook now change on the task's branch, and reach the base branch only through a merge. One mode per project:
+
+- `repo`, the default: the files are committed in `<repo>/.enki/`.
+- `private`: for team repos where enki files mustn't be committed. A local bare git repo per code repo in `.enki/memory/`, with branches mirroring the code's. It's synced at task start and by `enki memory sync`, by ancestry or by `git cherry`.
+
+Tested with real git (32 tests): migrations in both modes, branch-local settings, policy, commits, abandon, two repos merged separately, and in private mode every merge style (merge, fast-forward, rebase, squash), deleted branches, conflicts with a resumable sync, and manual merges.
+
+`enki migrate` ran in both modes on copies of `test-website`. Files, config and old-file renames were as expected, and private mode left the code repo untouched. No unmerged-knowledge warning appeared, correctly: `cart-page` had already been merged into `dev`.
+
+Not yet seen live: a real orchestrator writing memory during a task, and the init question.
+
+## Dashboard
+
+Checked against real data before building:
+
+| Check | Result |
+|---|---|
+| Claude session ID of a herdr agent | `herdr agent list` and `agent get` give it as `agent_session.value`, for the unnamed orchestrator pane too |
+| Token usage in transcripts | `~/.claude/projects/<folder>/<session>.jsonl`, on assistant lines as `message.usage`. One response repeats on up to 13 lines with the same `message.id` and usage (650 lines, 222 distinct), so the cache counts each ID once |
+| Spent and context | Spent is input, cache writes and output. Context is the latest message's input, cache writes and cache reads |
+
+Tested (14 tests): the token reader, starting from a folder outside any project, reuse, restart after a kill, replacing an older build, three simultaneous starts leaving one server, idle exit, a port held by another program, workers refused, the Host check, no CORS, view-only methods, and the task and project views against the fake herdr, with steps, states, tokens and activity.
+
+Screenshotted headlessly with enki's own Playwright install, against `test-website`'s six finished tasks. Those tasks predate the dashboard, so they show their event history but no tokens, steps or tool calls.
+

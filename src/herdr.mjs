@@ -74,6 +74,11 @@ export async function startAgent({ name, pane, args, timeout = 60000 }) {
   return call(['agent', 'start', name, '--kind', 'claude', '--pane', pane, '--timeout', String(timeout), '--', ...args], { timeout: timeout + 5000 })
 }
 
+/** Every live agent herdr knows, named or not. */
+export async function listAgents() {
+  return (await call(['agent', 'list'])).agents ?? []
+}
+
 /** Returns the agent object, or null when no such agent is live. */
 export async function getAgent(name) {
   try {

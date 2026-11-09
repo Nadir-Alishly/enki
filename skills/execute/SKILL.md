@@ -6,11 +6,13 @@ description: Runs an approved enki task through baseline, coding, testing, revie
 
 The approved plan is in `<task folder>/approved-plan.md`. Write each brief to `<task folder>/briefs/`, and run every `enki ask` with `run_in_background: true`.
 
+Every brief to the coder, tester, QA or reviewer names its plan step: `enki ask <role> <brief> --step N`. Enki refuses a step that belongs to another role, marks the step active when the agent starts, and done when it reports. A fix round reuses the same step number. Move your own steps, and correct any step, with `enki step N active|done|failed|todo`. The scout's steps are done when the plan is approved, and your own are done when the task finishes.
+
 Coder and reviewer briefs give the goal, acceptance criteria, affected repos and files, relevant notes, and the plan and scout report paths. Tester and QA briefs point to `requirements.md` and describe behaviour only: never paste code, diffs or coder reports into them. Enki adds the rules, the report path and the reply format.
 
 ## 1. Baseline
 
-1. Run `enki team start`. If it says nobody has recorded the start command, work it out from the scout report, correct `.enki/config.json` and the notes, then run it again. If it exits 3, a folder trust prompt is waiting: ask the user whether to trust the folder, and if they agree, run `enki answer <role> trust`, then `enki start <role>`.
+1. Run `enki team start`. If it says Playwright or a browser is missing, ask the user before running the `enki playwright install` command it names, because it downloads software. If it says nobody has recorded the start command, work it out from the scout report, correct `.enki/config.json` and the notes, then run it again. If it exits 3, a folder trust prompt is waiting: ask the user whether to trust the folder, and if they agree, run `enki answer <role> trust`, then `enki start <role>`.
 2. Run `git status` in the affected repos. Dirty files are the user's own: leave them alone.
 3. Run `enki phase baseline`, then `enki verify --baseline`. If it fails, have the tester sort stable pre-existing failures from flaky ones, and add them to the repo notes. A brand-new repo has nothing to run.
 
@@ -18,7 +20,7 @@ Coder and reviewer briefs give the goal, acceptance criteria, affected repos and
 
 Run `enki phase coding`. Then, in the same message, start both:
 
-- `enki ask tester <brief> --report tests.md --step tests`, unless the plan says `Tests: none`
+- `enki ask tester <brief> --step N --report tests.md`, unless the plan says `Tests: none`
 - `enki ask coder <brief>`, with the scout report path. For visual work, say the coder must read QA's screenshots before each tuning round
 
 If the tester says the requirements don't say enough, fix `requirements.md`, tell the coder if the interface changed, and tell the user if it changes what was approved.

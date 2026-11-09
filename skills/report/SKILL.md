@@ -6,9 +6,11 @@ description: Finishes an enki task by updating repo notes, writing the end-of-ta
 
 ## 1. Update notes
 
-Run `enki phase notes`. Update `.enki/notes/<repo>.md` with what was learned from the scout's map and the agents' findings: architecture, key files, conventions, how to test the area, pitfalls, flaky tests, known failures.
+Run `enki phase notes`. Update each repo's `notes.md` in the task's memory, at the path `enki status` gives, with what was learned from the scout's map and the agents' findings: architecture, key files, conventions, how to test the area, pitfalls, flaky tests, known failures.
 
-Record how the system starts and is tested if this task taught you anything new, and correct `.enki/config.json` to match.
+Record how the system starts and is tested if this task taught you anything new, and correct the repo's `repo.json` to match.
+
+Write only the task's copy, never the main tree's. It's committed with the task, and reaches the base branch only when the user merges, so an unmerged or abandoned task never leaves wrong notes behind. For a change to a contract between repos, such as an API, record each side in its own repo's notes: what the backend provides, and how the frontend uses it.
 
 Keep entries short and factual. Fix or delete entries that turned out wrong. Don't log task history: git has that. Update `.enki/config.json` if anything about a repo changed.
 
@@ -31,10 +33,10 @@ Rate how you ran the task, not how good the code is. Back every score with concr
 
 In the report's Safety evidence, list every worker prompt you approved yourself, from the `agent.answered` events with `by: orchestrator`.
 
-Under **Proposed workflow updates**, list concrete changes to `.enki/playbook.md`, `.enki/config.json` or how briefs are written, with the reason, or say "none needed". **Never apply them yourself.** The user approves which to make. Routine notes updates from step 1 aren't affected.
+Under **Proposed workflow updates**, list concrete changes to a repo's `playbook.md`, the project's `.enki/playbook.md` or `.enki/config.json`, or how briefs are written, with the reason, or say "none needed". **Never apply them yourself.** The user approves which to make. Routine notes updates from step 1 aren't affected.
 
 ## 4. Close
 
-Run `enki phase done`. It stops any server still running for this task. Give the user a condensed report in the terminal and end with: "Task saved to `<task folder>`. Run `/clear` before the next task."
+Run `enki phase done`. It stops the task's server, commits the worktree to the task's branch, removes the worktree and frees the port and any database copy. Its output gives the branch and the command to review it: put both in the report. If the commit fails, for example because a git hook refused it, the task isn't done: show the user the output, and send the coder what the hook reported. Give the user a condensed report in the terminal and end with: "Task saved to `<task folder>`. Run `/clear` before the next task."
 
 Keep the task's herdr tab and agents open: the user closes them.

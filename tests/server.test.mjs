@@ -21,6 +21,7 @@ async function setup(devServer, config = {}) {
   const project = makeProject({
     repos: [{ path: 'web', url: `http://127.0.0.1:${port}`, testGlobs: ['tests/**'], devServer: start }],
     timeouts: { server: 4000 },
+    ports: { from: port, to: port },
     ...config,
   })
   assert.equal(project.enki(['task', 'new', 'demo']).code, 0)
@@ -144,6 +145,33 @@ test('a failed start reports the output, closes its tab and records the failure'
   assert.equal(project.state('demo').servers.web, undefined)
   assert.equal(project.herdr.calls('tab', 'close').length, 1)
   assert.ok(project.events('demo').some(event => event.type === 'server.failed'))
+})
+
+test('a start command without {port} gets a hint when it fails', async () => {
+  const { project } = await setup({ start: 'exit 1' }, { timeouts: { server: 700 } })
+  const result = project.enki(['server', 'start'])
+  assert.match(result.err, /this start command has no \{port\} in it/)
+  assert.match(result.err, /npm run dev -- --port \{port\} --strictPort/)
+  assert.match(result.err, /bin\/rails server -p \{port\}/)
+})
+
+test('a start command with {port} gets no port hint', async () => {
+  const { project } = await setup({ start: 'exit 1 # {port}' }, { timeouts: { server: 700 } })
+  assert.doesNotMatch(project.enki(['server', 'start']).err, /has no \{port\}/)
+})
+
+test('validate and doctor warn about a start command without {port}', () => {
+  const project = makeProject({ repos: [
+    { path: 'web', url: 'http://localhost:4321', devServer: { start: 'npm run dev' } },
+    { path: 'api', url: 'http://localhost:8000', devServer: { start: 'python manage.py runserver {port}' } },
+    { path: 'own', url: 'http://localhost:9000', devServer: { managedBy: 'user', start: 'npm run dev' } },
+  ] })
+  const result = project.enki(['validate'])
+  assert.equal(result.code, 0, result.err)
+  assert.match(result.out, /warning: web: devServer\.start has no \{port\}.*reads the PORT variable/)
+  assert.doesNotMatch(result.out, /warning: api/)
+  assert.doesNotMatch(result.out, /warning: own/)
+  assert.match(project.enki(['doctor']).out, /warning: web/)
 })
 
 test('a server that died is started again', async t => {
