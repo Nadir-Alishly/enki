@@ -57,6 +57,19 @@ If the project config has a `database` section, also add one of these lines, wit
 - `Database: shared`: the task uses the real one. Only when nothing can write to it.
 - `Database: none`: the task needs no database, and enki cuts it off so nothing reaches the real one by accident.
 
+Every plan has a **Steps** list, one line per step, each with exactly one owner. Enki reads it from the approved plan, agents work it step by step, and the dashboard shows it:
+
+```
+1. [Scout] Map the refund code paths
+2. [Tester] Write tests for duplicate refunds
+3. [Coder] Add the idempotency middleware and migration
+4. [QA] Try a double refund on the running app
+5. [Reviewer] Review the diff
+6. [Orchestrator] Update notes and write the report
+```
+
+Owners are Orchestrator, Scout, Coder, Tester, QA or Reviewer. Split work so each step is one agent's. `enki team start` refuses a plan without steps.
+
 Also add a **public interface** section to the plan: the routes, commands, exported names and element IDs tests can rely on. The tester and coder work from it at the same time, so it has to be specific.
 
 Add `Tests: none` only for a change with no testable behaviour, such as a copy edit. Add `QA: none` only if nothing about the change can be checked by hand.

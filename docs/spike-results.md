@@ -162,3 +162,18 @@ Tested with real git (32 tests): migrations in both modes, branch-local settings
 `enki migrate` ran in both modes on copies of `test-website`. Files, config and old-file renames were as expected, and private mode left the code repo untouched. No unmerged-knowledge warning appeared, correctly: `cart-page` had already been merged into `dev`.
 
 Not yet seen live: a real orchestrator writing memory during a task, and the init question.
+
+## Dashboard
+
+Checked against real data before building:
+
+| Check | Result |
+|---|---|
+| Claude session ID of a herdr agent | `herdr agent list` and `agent get` give it as `agent_session.value`, for the unnamed orchestrator pane too |
+| Token usage in transcripts | `~/.claude/projects/<folder>/<session>.jsonl`, on assistant lines as `message.usage`. One response repeats on up to 13 lines with the same `message.id` and usage (650 lines, 222 distinct), so the cache counts each ID once |
+| Spent and context | Spent is input, cache writes and output. Context is the latest message's input, cache writes and cache reads |
+
+Tested (14 tests): the token reader, starting from a folder outside any project, reuse, restart after a kill, replacing an older build, three simultaneous starts leaving one server, idle exit, a port held by another program, workers refused, the Host check, no CORS, view-only methods, and the task and project views against the fake herdr, with steps, states, tokens and activity.
+
+Screenshotted headlessly with enki's own Playwright install, against `test-website`'s six finished tasks. Those tasks predate the dashboard, so they show their event history but no tokens, steps or tool calls.
+

@@ -106,6 +106,7 @@ export function createState({ taskDir, slug, projectId, projectRoot, repos, orch
     tests: true,
     qa: true,
     scope: [],
+    steps: null,
     verify: null,
     baselinePassed: null,
     treeSnapshot: null,

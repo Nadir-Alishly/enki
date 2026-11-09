@@ -88,6 +88,30 @@ A server needs a `url` for enki to manage it, because that's how enki knows it's
 
 Nothing else can start or stop servers: each project's own commands are blocked automatically, along with the common ones for most stacks. If something is already running at the URL, enki uses it and leaves it alone. Set `devServer.managedBy` to `"user"` to run the server yourself.
 
+## Dashboard
+
+Enki has a local, read-only web dashboard covering every enki project on this computer. Open it with:
+
+```
+enki dashboard --open
+```
+
+It works from any folder. Any enki session or new task also starts it in the background, so it's usually already running at `http://localhost:4747/`.
+
+- **Project view:** a year of finished tasks as a heatmap, tokens spent by agent role over 7, 30 or 90 days, every task with its status, duration and tokens, and the project's settings and models.
+- **Task view:** the agent team with each agent's live state, current plan step, tool call count and context in use against its model's window, then context by agent, the plan with each step's status, any alert that needs you, and the activity feed. Hover or click an agent's card or context total to pick it out everywhere on the page; Escape clears it.
+
+Agent states are herdr's own (Running, Idle, Done, Needs you), plus Stopped, and Error for an agent that vanished from an open task. They follow herdr within about 2 seconds. Plan steps come from the approved plan's **Steps** list: each `enki ask --step N` marks a step active, and the agent's report marks it done.
+
+How it works:
+
+- One server per computer, owned by no session. It listens only on `127.0.0.1`, refuses requests for any other host name, sends no CORS headers and accepts no changes. It exits after 30 minutes with no open task and no open page.
+- It reads what enki already writes: the project registry in `~/.enki/projects.json`, each task's state, event log and activity log, and herdr's agent list. Tokens come from Claude Code's own session transcripts. A cache in `~/.enki/dashboard.db` saves rereading them, and can be deleted at any time.
+- `enki dashboard status` and `enki dashboard stop` check or stop it. After a plugin update, the next start replaces an older server.
+- `ENKI_DASHBOARD_PORT` picks another port. `ENKI_DASHBOARD=off` stops enki from starting it.
+
+Tasks started before the dashboard existed show their history, but not their tokens, steps or tool calls.
+
 ## Requirements
 
 - Claude Code 2.1.318 or newer
@@ -173,7 +197,7 @@ Enki's policy applies in every mode, and a command the hook denies stays denied 
 | `/enki:resume <slug>` | Continue a task after `/clear` or in a new session |
 | `/enki:status` | Show task state |
 
-The orchestrator drives the `enki` CLI, which is on the Bash `PATH` while the plugin is enabled. Run `enki help` to see it.
+The orchestrator drives the `enki` CLI, which is on the Bash `PATH` while the plugin is enabled. Run `enki help` to see it. You can run `enki dashboard` yourself, from any folder.
 
 ## Configuration
 

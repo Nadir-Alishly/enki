@@ -41,7 +41,7 @@ const working = (project, role) => project.herdr.script((script, state) => { sta
 test('the tester and coder can start at the same time', () => {
   const project = ready()
   assert.equal(project.enki(['ask', 'coder', project.brief()]).code, 0)
-  assert.equal(project.enki(['ask', 'tester', project.brief(), '--report', 'tests.md', '--step', 'tests']).code, 0)
+  assert.equal(project.enki(['ask', 'tester', project.brief(), '--report', 'tests.md']).code, 0)
   working(project, 'coder')
   project.herdr.script((script, state) => { state.agents['tester-demo'].status = 'done' })
   assert.equal(project.enki(['ask', 'tester', project.brief()]).code, 0)
@@ -74,7 +74,7 @@ test('the tester and QA need requirements, not the plan', () => {
 
 test('tests are written to their own report', () => {
   const project = ready()
-  project.enki(['ask', 'tester', project.brief(), '--report', 'tests.md', '--step', 'tests'])
+  project.enki(['ask', 'tester', project.brief(), '--report', 'tests.md'])
   const prompt = project.herdr.calls('agent', 'prompt', 'tester-demo')[0][3]
   assert.match(readFileSync(prompt.slice(5, -' and follow it.'.length), 'utf8'), /tests\.md/)
 })

@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { loadProjectConfig } from '../src/memory.mjs'
+import { ensureDashboardInBackground } from '../src/dashboard.mjs'
 import { pluginRoot } from '../src/paths.mjs'
 import { readState, recordEvent, resolveTask } from '../src/state.mjs'
 import { locate, out, readInput } from './lib.mjs'
@@ -30,6 +31,13 @@ function run() {
   }
   const task = resolveTask(where.root)
   if (config.mode !== 'auto' && !task) return
+  // Each start, resume or /clear is a new Claude session; the dashboard adds up their tokens.
+  if (task && input.session_id) recordEvent(task.taskDir, 'orchestrator.session', { session: input.session_id, source: input.source ?? null })
+  try {
+    ensureDashboardInBackground(join(pluginRoot, 'bin', 'enki'))
+  } catch {
+    // The dashboard is a convenience: it never gets in the session's way.
+  }
   const prompt = readFileSync(join(pluginRoot, 'prompts', 'orchestrator.md'), 'utf8')
   const bound = task
     ? `\n\n## This session\n\nYou are running task \`${task.slug}\` (phase: ${readState(task.taskDir).phase}). Run \`enki resume ${task.slug}\` before anything else, and continue from the recorded phase.\n`

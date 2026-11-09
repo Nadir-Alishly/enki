@@ -366,6 +366,8 @@ test('a linked folder git can see is still not committed', () => {
   writeFileSync(join(worktreeOf(project), 'src/app.js'), 'changed\n')
   assert.equal(project.enki(['phase', 'done']).code, 0)
   assert.equal(git(project.web, 'show', '--name-only', '--format=', 'demo'), 'src/app.js')
+  const report = project.state('demo').steps.find(step => step.owner === 'orchestrator')
+  assert.equal(report.status, 'done', 'finishing the task finishes the orchestrator\'s own steps')
 })
 
 test('a git hook that refuses the commit leaves the task open and its worktree working', () => {

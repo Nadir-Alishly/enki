@@ -14,6 +14,7 @@ import { availableSkills, resolveSkill, skillWarnings, SkillError } from './skil
 import { mcpConfig, playwrightProblem } from './playwright.mjs'
 import { allocatePorts, releasePorts } from './ports.mjs'
 import { commitMessage, createWorktrees, finishWorktrees, git, installDependencies, worktreesDir, WorktreeError, writeEnvFiles } from './worktrees.mjs'
+import { ensureDashboard } from './dashboard.mjs'
 import { copyDatabase, DatabaseError, databaseEnv, dropDatabase, fill, taskToken } from './database.mjs'
 import { writeRoleFile, writeRules } from './rules.mjs'
 import { createState, enkiHome, listTasks, PHASES, readEvents, readState, recordEvent, registerProject, resolveTask, tasksDir, updateState, writeJsonAtomic } from './state.mjs'
@@ -227,10 +228,12 @@ export async function startRole(taskDir, role) {
       `${name} started, but the enki hooks did not report from it, so its rules would not be enforced. Install enki at user scope (claude plugin install enki@enki-plugins --scope user), then run: enki start ${role}`,
     )
   }
+  // The Claude session behind the agent: its transcript is where its token use is recorded.
+  const session = (await herdr.getAgent(name).catch(() => null))?.agent_session?.value ?? null
   updateState(taskDir, current => {
-    current.agents[role] = { name, pane, startedAt: new Date().toISOString() }
+    current.agents[role] = { name, pane, session, startedAt: new Date().toISOString() }
   })
-  recordEvent(taskDir, 'agent.started', { role, name, pane })
+  recordEvent(taskDir, 'agent.started', { role, name, pane, session })
   return name
 }
 
@@ -307,6 +310,10 @@ export async function newTask({ root, slug, repoNames = [] }) {
   registerProject({ id: projectId, root })
   writeRules(state, config)
   recordEvent(taskDir, 'task.created', { slug, repos: repos.map(repo => repo.name), worktrees: worktrees.map(tree => ({ path: tree.path, branch: tree.branch, base: tree.base })), ports, memory: memoryNotes })
+  // The orchestrator's own Claude session, so the dashboard can count its tokens too.
+  const orchestrator = state.orchestratorPane && (await herdr.listAgents().catch(() => [])).find(agent => agent.pane_id === state.orchestratorPane)
+  if (orchestrator?.agent_session?.value) recordEvent(taskDir, 'orchestrator.session', { session: orchestrator.agent_session.value })
+  ensureDashboard({ wait: false }).catch(() => {})
 
   const grid = await buildGrid(state)
   updateState(taskDir, current => {
@@ -336,6 +343,9 @@ export async function teamStart({ root, slug }) {
   })
   if (unknown.length > 0) {
     throw new EnkiError(`Nobody has recorded how to start ${unknown.map(repo => repo.name).join(', ')}. Find the command from the scout report, add it as devServer.start in .enki/config.json, then run this again.`)
+  }
+  if (Array.isArray(task.steps) && task.steps.length === 0) {
+    throw new EnkiError('The approved plan has no steps, so nobody can follow it and the dashboard has nothing to show. Run enki phase planning, add a Steps list ("1. [Coder] ...", one owner per step) and present the plan again.')
   }
   await prepareWorktreeForTeam(task, config)
   const roles = ['coder', 'tester', ...(task.qa === false ? [] : ['qa']), 'reviewer']
@@ -481,11 +491,70 @@ async function finishWait(state, role, name, timeout, tail) {
   if (status === 'blocked') return blockedResult(state, role, name)
   const output = await herdr.readAgent(name, tail)
   recordEvent(state.taskDir, 'agent.finished', { role, name, status })
+  finishStep(state.taskDir, role)
   return { exitCode: EXIT.ok, status, output: output.trimEnd() }
 }
 
-function timeoutFor(config, role, step) {
-  return config.timeouts[step ?? role] ?? config.timeouts[role]
+const timeoutFor = (config, role) => config.timeouts[role]
+
+// Plan steps: the orchestrator writes them, each with an owner, and they move with the work.
+export const STEP_OWNERS = { orchestrator: 'orchestrator', scout: 'scout', coder: 'coder', tester: 'tester', qa: 'qa', reviewer: 'reviewer' }
+export const STEP_STATUSES = ['todo', 'active', 'done', 'failed']
+const STEP_LINE = /^\s*(\d+)[.)]\s*\[(orchestrator|scout|coder|tester|qa|reviewer)\]\s*(.+?)\s*$/i
+
+/** "1. [Coder] Rewrite the intent flow" lines from the approved plan. */
+export function parseSteps(plan) {
+  return plan
+    .split('\n')
+    .map(line => STEP_LINE.exec(line))
+    .filter(Boolean)
+    .map(match => ({ n: Number(match[1]), owner: match[2].toLowerCase(), text: match[3], status: 'todo' }))
+}
+
+/** The roles whose briefs must name a step, once a plan has them. */
+const STEP_ROLES = new Set(['coder', 'tester', 'qa', 'reviewer'])
+
+function setStep(taskDir, n, status, by) {
+  const next = updateState(taskDir, current => {
+    const step = current.steps?.find(item => item.n === n)
+    if (step) step.status = status
+  })
+  const step = next.steps?.find(item => item.n === n)
+  if (step) recordEvent(taskDir, 'step.status', { n, status, owner: step.owner, text: step.text, by })
+  return step
+}
+
+/** When an agent reports, the step it was sent for is done. */
+function finishStep(taskDir, role) {
+  const state = readState(taskDir)
+  const n = state.agents?.[role]?.step
+  const step = state.steps?.find(item => item.n === n)
+  if (step && step.status === 'active') setStep(taskDir, n, 'done', role)
+}
+
+export function moveStep({ root, slug, n, status }) {
+  if (!STEP_STATUSES.includes(status)) throw new EnkiError(`A step can be: ${STEP_STATUSES.join(', ')}`, EXIT.usage)
+  const task = requireTask(root, slug)
+  const step = task.steps?.find(item => item.n === n)
+  if (!step) throw new EnkiError(`The plan has no step ${n}.`, EXIT.usage)
+  setStep(task.taskDir, n, status, 'orchestrator')
+  return `Step ${n} (${step.owner}: ${step.text}) is now ${status}.`
+}
+
+/** Checks the step a brief is for, and marks it active. */
+function startStep(task, role, step) {
+  const planned = (task.steps ?? []).length > 0
+  if (step === undefined) {
+    if (planned && STEP_ROLES.has(role)) throw new EnkiError(`Name the plan step this brief is for: enki ask ${role} <brief> --step N. Steps for the ${role}: ${task.steps.filter(item => item.owner === role).map(item => item.n).join(', ') || 'none'}.`, EXIT.usage)
+    return
+  }
+  const found = task.steps?.find(item => item.n === step)
+  if (!found) throw new EnkiError(`The plan has no step ${step}.`, EXIT.usage)
+  if (found.owner !== role) throw new EnkiError(`Step ${step} belongs to the ${found.owner}, not the ${role}.`, EXIT.usage)
+  updateState(task.taskDir, current => {
+    current.agents[role].step = step
+  })
+  setStep(task.taskDir, step, 'active', role)
 }
 
 export async function ask({ root, slug, role, briefPath, report, step, timeout }) {
@@ -505,6 +574,7 @@ export async function ask({ root, slug, role, briefPath, report, step, timeout }
     throw new EnkiError(`${name} is still working. Use: enki wait ${role}`, EXIT.busy)
   }
   await checkGates(task, role)
+  startStep(task, role, step)
   // New code or new tests mean the last test result no longer says anything.
   if (role === 'coder' || role === 'tester') {
     updateState(task.taskDir, current => {
@@ -536,7 +606,7 @@ export async function ask({ root, slug, role, briefPath, report, step, timeout }
     }
   }
   if (seen === 'blocked') return blockedResult(task, role, name)
-  return finishWait(task, role, name, timeout ?? timeoutFor(config, role, step), 40)
+  return finishWait(task, role, name, timeout ?? timeoutFor(config, role), 40)
 }
 
 export async function wait({ root, slug, role, timeout }) {
@@ -868,6 +938,12 @@ export async function setPhase({ root, slug, phase, abandon = false }) {
     if (toPlanning) current.approved = false
   })
   recordEvent(task.taskDir, 'task.phase', { from: task.phase, to: phase })
+  // A finished task has done the orchestrator's own steps (notes, the report), whether or not it ticked them.
+  if (phase === 'done' && !abandon) {
+    for (const step of task.steps ?? []) {
+      if (step.owner === 'orchestrator' && step.status !== 'done' && step.status !== 'failed') setStep(task.taskDir, step.n, 'done', 'orchestrator')
+    }
+  }
   return { phase, notes }
 }
 
@@ -960,6 +1036,7 @@ export const readApprovedScope = plan => ({
 /** Called only by the ExitPlanMode hook, which only fires after the user approves. */
 export function approvePlan(task, planText) {
   const { scope, tests, qa, database } = readApprovedScope(planText)
+  const steps = parseSteps(planText)
   writeFileSync(join(task.taskDir, 'approved-plan.md'), planText)
   const hasDatabase = Boolean(loadTaskConfig(task).database)
   const next = updateState(task.taskDir, current => {
@@ -970,11 +1047,16 @@ export function approvePlan(task, planText) {
     current.scope = scope
     current.tests = tests
     current.qa = qa
+    current.steps = steps
   })
   const config = loadTaskConfig(next)
   writeRules(next, config)
-  recordEvent(task.taskDir, 'plan.approved', { scope, tests, qa, database: next.database })
-  return next
+  recordEvent(task.taskDir, 'plan.approved', { scope, tests, qa, database: next.database, steps: steps.length })
+  // The scout reports before the plan exists, so its steps are already done when the plan is approved.
+  if (existsSync(join(task.taskDir, 'scout.md'))) {
+    for (const step of steps.filter(item => item.owner === 'scout')) setStep(task.taskDir, step.n, 'done', 'scout')
+  }
+  return readState(task.taskDir)
 }
 
 const browserLock = () => join(enkiHome(), 'browser.lock')

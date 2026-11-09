@@ -4,6 +4,8 @@ import { changedSource } from '../src/checks.mjs'
 import { ConfigError } from '../src/config.mjs'
 import { loadProjectConfig, loadTaskConfig } from '../src/memory.mjs'
 import { BLIND_ROLES, decide } from '../src/policy.mjs'
+import { appendFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { readState, recordEvent, resolveTask } from '../src/state.mjs'
 import { locate, out, readInput } from './lib.mjs'
 
@@ -27,6 +29,17 @@ function repairsConfig() {
   return input.tool_name === 'Bash' && /^enki\s+(validate|doctor)\b/.test(input.tool_input?.command ?? '')
 }
 
+/** One short line per tool call, for the dashboard: which agent, which tool, on what. */
+function logActivity(taskDir) {
+  const toolInput = input.tool_input ?? {}
+  const target = toolInput.file_path ?? toolInput.command ?? toolInput.pattern ?? toolInput.url ?? toolInput.description ?? ''
+  try {
+    appendFileSync(join(taskDir, 'activity.jsonl'), `${JSON.stringify({ t: new Date().toISOString(), role: where.role, tool: input.tool_name, target: String(target).replace(/\s+/g, ' ').slice(0, 100) })}\n`)
+  } catch {
+    // The log is for display: it must never block a tool call.
+  }
+}
+
 function run() {
   if (!where) return
   const taskDir = process.env.ENKI_TASK
@@ -44,6 +57,8 @@ function run() {
   if (worker && BLIND_ROLES.has(where.role) && state.treeSnapshot) {
     state.blindFiles = changedSource(state.repos, state.treeSnapshot)
   }
+
+  if (state) logActivity(state.taskDir)
 
   const ctx = { role: where.role, root, cwd: input.cwd ?? process.cwd(), config, state }
   const reason = decide(ctx, input.tool_name, input.tool_input)

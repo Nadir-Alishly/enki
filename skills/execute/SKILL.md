@@ -6,6 +6,8 @@ description: Runs an approved enki task through baseline, coding, testing, revie
 
 The approved plan is in `<task folder>/approved-plan.md`. Write each brief to `<task folder>/briefs/`, and run every `enki ask` with `run_in_background: true`.
 
+Every brief to the coder, tester, QA or reviewer names its plan step: `enki ask <role> <brief> --step N`. Enki refuses a step that belongs to another role, marks the step active when the agent starts, and done when it reports. A fix round reuses the same step number. Move your own steps, and correct any step, with `enki step N active|done|failed|todo`. The scout's steps are done when the plan is approved, and your own are done when the task finishes.
+
 Coder and reviewer briefs give the goal, acceptance criteria, affected repos and files, relevant notes, and the plan and scout report paths. Tester and QA briefs point to `requirements.md` and describe behaviour only: never paste code, diffs or coder reports into them. Enki adds the rules, the report path and the reply format.
 
 ## 1. Baseline
@@ -18,7 +20,7 @@ Coder and reviewer briefs give the goal, acceptance criteria, affected repos and
 
 Run `enki phase coding`. Then, in the same message, start both:
 
-- `enki ask tester <brief> --report tests.md --step tests`, unless the plan says `Tests: none`
+- `enki ask tester <brief> --step N --report tests.md`, unless the plan says `Tests: none`
 - `enki ask coder <brief>`, with the scout report path. For visual work, say the coder must read QA's screenshots before each tuning round
 
 If the tester says the requirements don't say enough, fix `requirements.md`, tell the coder if the interface changed, and tell the user if it changes what was approved.

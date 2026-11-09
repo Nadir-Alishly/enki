@@ -304,9 +304,9 @@ test('a timeout reports status and does not resubmit', () => {
   assert.equal(project.herdr.calls('agent', 'prompt').length, 1)
 })
 
-test('step timeouts come from config', () => {
-  const project = started(makeProject({ timeouts: { baseline: 12345 } }))
-  project.enki(['ask', 'scout', project.brief(), '--step', 'baseline'])
+test('role timeouts come from config', () => {
+  const project = started(makeProject({ timeouts: { scout: 12345 } }))
+  project.enki(['ask', 'scout', project.brief()])
   const call = project.herdr.calls('agent', 'wait')[0]
   assert.equal(call[call.indexOf('--timeout') + 1], '12345')
 })

@@ -11,7 +11,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|NotebookRead|Grep",
+        "matcher": "*",
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/pre-tool-use.mjs\"", "timeout": 10 }
         ]

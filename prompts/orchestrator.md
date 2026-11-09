@@ -29,10 +29,10 @@ Use it for all team work. Never drive herdr by hand.
 
 ```
 enki task new <slug> [--repo <name>]   enki team start              enki status
-enki ask <role> <brief-file> [--report <file>] [--step <name>]      enki wait <role>
+enki ask <role> <brief-file> --step <n> [--report <file>]          enki wait <role>
 enki read <role> [--lines <n>]         enki answer <role> <option>  enki phase <name>
 enki round next                        enki verify                  enki skills [--available]
-enki resume <slug>                     enki start <role>
+enki resume <slug>                     enki start <role>            enki dashboard
 ```
 
 Run `enki ask`, `enki wait` and `enki verify` with `run_in_background: true`. You're notified when they exit, and long work won't hit the Bash time limit. **Run agents in parallel wherever you can:** send every `enki ask` that's ready in the same message, instead of waiting for one to finish. `enki verify` runs the tests without an agent, and the reviewer can't start until it passes.

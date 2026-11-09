@@ -36,7 +36,8 @@ const agent = name => {
   if (!found) fail('agent_not_found', `agent target ${name} not found`)
   return found
 }
-const shape = (name, status) => ({ agent: { agent: 'claude', agent_status: status, name, pane_id: state.agents[name]?.pane } })
+const session = name => ({ agent: 'claude', kind: 'id', source: 'herdr:claude', value: `session-${name}` })
+const shape = (name, status) => ({ agent: { agent: 'claude', agent_status: status, name, pane_id: state.agents[name]?.pane, agent_session: session(name) } })
 const shift = (key, name, fallback) => { const queue = state.script[key]?.[name]; return queue?.length ? queue.shift() : fallback }
 
 const [group, command, target] = args
@@ -98,7 +99,14 @@ if (group === 'agent') {
     }
     ok(shape(target, 'idle'))
   }
-  if (command === 'get') { const found = agent(target); ok({ agent: { agent: 'claude', agent_status: found.status, name: target, pane_id: found.pane } }) }
+  if (command === 'get') { const found = agent(target); ok({ agent: { agent: 'claude', agent_status: found.status, name: target, pane_id: found.pane, agent_session: session(target) } }) }
+  if (command === 'list') {
+    // The orchestrator is an unnamed agent in its own pane, as in real herdr.
+    const orchestrator = process.env.HERDR_PANE_ID ? [{ agent: 'claude', agent_status: state.script.orchestratorStatus ?? 'working', pane_id: process.env.HERDR_PANE_ID, agent_session: session('orchestrator') }] : []
+    // Read-only, and unrecorded: the dashboard polls it while the CLI changes the state.
+    process.stdout.write(`${JSON.stringify({ id: 'cli', result: { agents: [...orchestrator, ...Object.entries(state.agents).filter(([, found]) => !found.gone).map(([name, found]) => ({ agent: 'claude', agent_status: found.status, name, pane_id: found.pane, agent_session: session(name) }))] } })}\n`)
+    process.exit(0)
+  }
   if (command === 'prompt') {
     agent(target)
     const outcome = shift('prompt', target, 'working')
