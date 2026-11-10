@@ -283,4 +283,6 @@ To try a working copy, run Claude with `--plugin-dir` and set `ENKI_DEV_PLUGIN_D
 
 ## License
 
-MIT
+Apache License 2.0. See [LICENSE](LICENSE).
+
+If you build on enki or redistribute it, keep the [NOTICE](NOTICE) file with your copy and include its attribution in your documentation, as section 4 of the license requires.
