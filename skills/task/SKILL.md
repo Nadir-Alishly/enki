@@ -51,11 +51,13 @@ The plan must also carry these lines, at the start of a line, because enki reads
 
 Only include a `Scope:` line the user actually wants.
 
-If the project config has a `database` section, also add one of these lines, with a one-line reason:
+If the project config has a `database` section, also add one of these lines, with a one-line reason. Start from the project's `database.default` (`copy` if unset), and change it only when the task calls for another:
 
-- `Database: copy`: the task gets its own copy. Use it whenever tests or QA might write data. It's also what enki does if the line is missing.
+- `Database: copy`: the task gets its own copy. Use it whenever tests or QA might write data. Not available while `database.enabled` is `false`: enki uses the shared database instead.
 - `Database: shared`: the task uses the real one. Only when nothing can write to it.
 - `Database: none`: the task needs no database, and enki cuts it off so nothing reaches the real one by accident.
+
+If the line is missing, enki uses the project's default.
 
 Every plan has a **Steps** list, one line per step, each with exactly one owner. Enki reads it from the approved plan, agents work it step by step, and the dashboard shows it:
 

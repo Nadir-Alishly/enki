@@ -10,7 +10,7 @@ export function buildId() {
   const hash = createHash('sha256')
   for (const dir of [dashboardDir, join(dashboardDir, 'public')]) {
     for (const name of readdirSync(dir).sort()) {
-      if (!/\.(mjs|js|css|html)$/.test(name)) continue
+      if (!/\.(mjs|js|css|html|svg)$/.test(name)) continue
       hash.update(name).update(readFileSync(join(dir, name)))
     }
   }

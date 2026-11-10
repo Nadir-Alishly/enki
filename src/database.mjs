@@ -1,9 +1,19 @@
 // A task's database, decided in its plan: its own copy, the shared one, or none at all.
 import { execFileSync } from 'node:child_process'
 
-export const DATABASE_MODES = ['copy', 'shared', 'none']
+export { DATABASE_MODES } from './config.mjs'
 
 export class DatabaseError extends Error {}
+
+/**
+ * The task's database mode from its plan's line. With no line, the project's default, else a copy:
+ * the safe choice. While copying is off, a copy becomes the shared database.
+ */
+export function planDatabase(database, chosen) {
+  if (!database) return null
+  const mode = chosen ?? database.default ?? 'copy'
+  return mode === 'copy' && database.enabled === false ? 'shared' : mode
+}
 
 /** `{task}` is the slug with underscores, so it works inside database names. */
 export function fill(text, values) {

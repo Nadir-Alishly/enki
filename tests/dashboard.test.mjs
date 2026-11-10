@@ -16,7 +16,7 @@ let nextPort = 47100 + Math.floor(Math.random() * 700)
 const sleep = ms => new Promise(done => setTimeout(done, ms))
 
 /** A raw request, so the Host header can be anything. */
-function call(port, path, { method = 'GET', headers = {} } = {}) {
+function call(port, path, { method = 'GET', headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
     const req = request({ host: '127.0.0.1', port, path, method, agent: false, headers: { host: `localhost:${port}`, ...headers } }, res => {
       let body = ''
@@ -25,7 +25,7 @@ function call(port, path, { method = 'GET', headers = {} } = {}) {
     })
     req.on('error', reject)
     req.setTimeout(2000, () => req.destroy(new Error('timeout')))
-    req.end()
+    req.end(body)
   })
 }
 
@@ -211,7 +211,7 @@ test('workers cannot run enki dashboard, and tests keep it off', async t => {
 
 // Safety
 
-test('the server answers only its own host name, has no CORS, and is read-only', async t => {
+test('the server answers only its own host name, has no CORS, and writes nothing but settings', async t => {
   const project = makeProject()
   const dash = dashboardFor(t, project)
   dash.run()
@@ -319,6 +319,43 @@ test('the task view follows agents, steps, tokens and activity', async t => {
   assert.ok(await waitFor(async () => (await detail()).agents.find(agent => agent.role === 'reviewer').state === 'error'))
 })
 
+test('settings save only from our own page, with its token, as JSON, over the latest file', async t => {
+  const project = makeProject()
+  mkdirSync(project.env.ENKI_HOME, { recursive: true })
+  writeFileSync(join(project.env.ENKI_HOME, 'projects.json'), JSON.stringify({ proj1: { root: project.root, lastUsedAt: new Date().toISOString() } }))
+  const dash = dashboardFor(t, project, { ENKI_CLAUDE_BIN: 'false' })
+  dash.run()
+  const origin = `http://localhost:${dash.port}`
+  const { editToken } = (await dash.get('/api/session')).json()
+  const read = (await dash.get('/api/projects/proj1/settings')).json()
+  assert.equal(read.values.team.coder.model, 'claude-sonnet-5-5')
+  assert.equal(read.options.models.source, 'enki', 'without Claude Code’s catalog, enki’s own list')
+  assert.ok(read.options.models.models.some(model => model.id === 'claude-opus-5-5'))
+  assert.equal((await dash.get('/api/projects/proj1/skills')).status, 200)
+  assert.equal((await dash.get('/api/projects/nope/settings')).status, 404)
+
+  const body = JSON.stringify({ base: read.hash, changes: { 'team.coder.model': 'claude-opus-5-5' } })
+  const save = (headers, payload = body) => dash.get('/api/projects/proj1/settings', { method: 'POST', body: payload, headers: { 'content-type': 'application/json', origin, 'x-enki-edit': editToken, ...headers } })
+  assert.equal((await save({ origin: 'http://evil.example' })).status, 403)
+  assert.equal((await save({ origin: '' })).status, 403)
+  assert.equal((await save({ 'x-enki-edit': 'wrong' })).status, 403)
+  assert.equal((await save({ 'content-type': 'text/plain' })).status, 415)
+  assert.equal((await save({}, 'x'.repeat(70 * 1024))).status, 413)
+  assert.equal((await save({}, '{nope')).status, 400)
+  assert.equal((await dash.get('/api/projects/nope/settings', { method: 'POST', body, headers: { 'content-type': 'application/json', origin, 'x-enki-edit': editToken } })).status, 404)
+  const invalid = await save({}, JSON.stringify({ base: read.hash, changes: { 'team.coder.effort': 'huge', permissionMode: 'dontAsk' } }))
+  assert.equal(invalid.status, 422)
+  assert.deepEqual(invalid.json().problems.map(item => item.path), ['team.coder.effort', 'permissionMode'])
+  const config = () => JSON.parse(readFileSync(join(project.root, '.enki/config.json'), 'utf8'))
+  assert.equal(config().team, undefined, 'refused saves write nothing')
+
+  const ok = await save({})
+  assert.equal(ok.status, 200)
+  assert.equal(config().team.coder.model, 'claude-opus-5-5')
+  assert.equal((await save({})).status, 409, 'the page’s copy is now stale')
+  assert.equal((await dash.get('/api/projects/proj1/settings', { method: 'PUT' })).status, 405)
+})
+
 test('the project view lists tasks, finished days and tokens by role', async t => {
   const project = makeProject()
   project.enki(['task', 'new', 'demo'])
@@ -337,9 +374,7 @@ test('the project view lists tasks, finished days and tokens by role', async t =
   assert.equal(detail.tokensByDay.length, 90)
   assert.equal(detail.tokensByDay.at(-1).roles.orchestrator, 1000)
   assert.equal(detail.heatmap.reduce((sum, day) => sum + day.count, 0), 0, 'abandoned tasks are not counted as finished')
-  assert.ok(detail.settings.rows.some(row => row.label === 'Repo web'))
-  assert.equal(detail.settings.models.length, 6)
-  assert.deepEqual(detail.settings.models[0], { role: 'orchestrator', label: 'Orchestrator', model: 'claude-sonnet-5-5', skills: [] }, 'the orchestrator shows the model its session ran on')
+  assert.equal(detail.settings, undefined, 'settings have their own page')
   assert.equal((await dash.get('/api/projects/nope')).status, 404)
   assert.equal((await dash.get('/api/projects/proj1/tasks/nope')).status, 404)
 })

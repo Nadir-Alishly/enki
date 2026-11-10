@@ -15,7 +15,7 @@ import { mcpConfig, playwrightProblem } from './playwright.mjs'
 import { allocatePorts, releasePorts } from './ports.mjs'
 import { commitMessage, createWorktrees, finishWorktrees, git, installDependencies, worktreesDir, WorktreeError, writeEnvFiles } from './worktrees.mjs'
 import { ensureDashboard } from './dashboard.mjs'
-import { copyDatabase, DatabaseError, databaseEnv, dropDatabase, fill, taskToken } from './database.mjs'
+import { copyDatabase, DatabaseError, databaseEnv, dropDatabase, fill, planDatabase, taskToken } from './database.mjs'
 import { writeRoleFile, writeRules } from './rules.mjs'
 import { createState, enkiHome, listTasks, PHASES, readEvents, readState, recordEvent, registerProject, resolveTask, tasksDir, updateState, writeJsonAtomic } from './state.mjs'
 
@@ -1038,10 +1038,9 @@ export function approvePlan(task, planText) {
   const { scope, tests, qa, database } = readApprovedScope(planText)
   const steps = parseSteps(planText)
   writeFileSync(join(task.taskDir, 'approved-plan.md'), planText)
-  const hasDatabase = Boolean(loadTaskConfig(task).database)
+  const mode = planDatabase(loadTaskConfig(task).database, database)
   const next = updateState(task.taskDir, current => {
-    // Without a Database line, a task gets its own copy: the safe choice.
-    current.database = hasDatabase ? (database ?? 'copy') : null
+    current.database = mode
     current.phase = 'approved'
     current.approved = true
     current.scope = scope
