@@ -356,6 +356,25 @@ test('settings save only from our own page, with its token, as JSON, over the la
   assert.equal((await dash.get('/api/projects/proj1/settings', { method: 'PUT' })).status, 405)
 })
 
+test('enki dashboard link names the task this pane orchestrates, for the band above its prompt', () => {
+  const project = makeProject()
+  const link = (env = {}) => {
+    // The harness turns the dashboard off; with it off, there's no band either.
+    const result = project.enki(['dashboard', 'link'], { ENKI_DASHBOARD: 'on', ...env })
+    return result.code === 0 ? JSON.parse(result.out) : { refused: result.err }
+  }
+  assert.deepEqual(link(), { url: 'http://localhost:4747/', task: null }, 'no task yet')
+  project.enki(['task', 'new', 'demo'])
+  const { task } = link()
+  const state = project.state('demo')
+  assert.deepEqual(task, { slug: 'demo', phase: state.phase, url: `http://localhost:4747/#/p/proj1/t/${encodeURIComponent(state.id)}` })
+  assert.equal(link({ HERDR_PANE_ID: 'w1:other' }).task, null, 'another pane has no task of its own')
+  assert.match(link({ ENKI_ROLE: 'coder' }).refused, /Workers can't run "enki dashboard"/, 'so workers never show the band')
+  assert.equal(link({ ENKI_DASHBOARD: 'off' }).task, null)
+  project.enki(['phase', 'done', '--abandon'])
+  assert.equal(link().task, null, 'a finished task hides it')
+})
+
 test('the project view lists tasks, finished days and tokens by role', async t => {
   const project = makeProject()
   project.enki(['task', 'new', 'demo'])
@@ -397,4 +416,39 @@ test('every tool call is logged for the dashboard, without changing the policy',
   const log = readFileSync(join(project.taskDir('demo'), 'activity.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
   assert.deepEqual(log.map(entry => [entry.role, entry.tool]), [['scout', 'Grep'], ['coder', 'Bash']])
   assert.equal(log[1].target, 'git push')
+})
+
+test('on KDE, opening the dashboard asks KWin to raise the page’s window; elsewhere it does nothing', async () => {
+  const { isKde, kwinScript, PAGE_TITLE, raiseDashboardWindow } = await import('../src/focus.mjs')
+  assert.equal(isKde({ XDG_CURRENT_DESKTOP: 'KDE' }), process.platform === 'linux')
+  assert.equal(isKde({ XDG_CURRENT_DESKTOP: 'GNOME' }), false)
+  const pattern = new RegExp(PAGE_TITLE)
+  for (const title of ['dark-mode · Enki — Helium', 'Settings · melda · Enki', 'Enki dashboard']) assert.match(title, pattern)
+  assert.doesNotMatch('fish ~/Projects/enki', pattern, 'a terminal in the enki folder is not the page')
+  const script = kwinScript()
+  assert.match(script, /workspace\.activeWindow = target/)
+  assert.match(script, /workspace\.currentDesktop = target\.desktops\[0\]/, 'it switches to the window’s desktop')
+  const before = process.env.XDG_CURRENT_DESKTOP
+  process.env.XDG_CURRENT_DESKTOP = 'GNOME'
+  try {
+    assert.equal(await raiseDashboardWindow({ delays: [0] }), false)
+  } finally {
+    if (before === undefined) delete process.env.XDG_CURRENT_DESKTOP
+    else process.env.XDG_CURRENT_DESKTOP = before
+  }
+})
+
+test('the band’s button opens the task’s page: --quiet silences the output, never the opening', async t => {
+  const project = makeProject()
+  project.enki(['task', 'new', 'demo'])
+  const opened = join(project.base, 'opened.txt')
+  const opener = join(project.base, 'fake-open')
+  writeFileSync(opener, `#!/bin/sh\necho "$1" >> ${opened}\n`, { mode: 0o755 })
+  const dash = dashboardFor(t, project)
+  const result = dash.run(['--open', '--quiet'], project.root, { ENKI_OPEN_BIN: opener })
+  assert.equal(result.code, 0, result.err)
+  assert.equal(result.out, '', 'quiet')
+  assert.ok(await waitFor(() => existsSync(opened)), 'the page was opened')
+  const id = project.state('demo').id
+  assert.equal(readFileSync(opened, 'utf8').trim(), `http://localhost:${dash.port}/#/p/proj1/t/${encodeURIComponent(id)}`)
 })

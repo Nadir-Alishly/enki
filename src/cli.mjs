@@ -7,11 +7,12 @@ import { ConfigError, DEFAULTS, findProjectRoot, ROLES } from './config.mjs'
 import { loadProjectConfig, loadTaskConfig, migrate, MemoryError, syncMemory } from './memory.mjs'
 
 const loadConfigDefaults = () => ({ ...DEFAULTS, browser: { ...DEFAULTS.browser } })
-import { DashboardError, dashboardStatus, ensureDashboard, stopDashboard } from './dashboard.mjs'
+import { DashboardError, dashboardDisabled, dashboardStatus, dashboardUrl, ensureDashboard, stopDashboard } from './dashboard.mjs'
 import * as herdr from './herdr.mjs'
 import * as playwright from './playwright.mjs'
 import * as task from './task.mjs'
 import { EnkiError, EXIT } from './task.mjs'
+import { raiseDashboardWindow } from './focus.mjs'
 import { writeRules } from './rules.mjs'
 import { readState, resolveTask } from './state.mjs'
 
@@ -28,7 +29,7 @@ Work      enki ask <role> <brief-file> [--step <n>] [--report <file>] [--timeout
 Server    enki server start|stop|restart|status [--repo <name>]
 Memory    enki migrate --memory repo|private | enki memory sync | enki memory merge <slug>
 Progress  enki phase <name> | enki phase done --abandon | enki round next | enki rules
-Dashboard enki dashboard [--open] | enki dashboard status|stop
+Dashboard enki dashboard [--open] | enki dashboard status|stop|link
 Browser   enki playwright status | enki playwright install [--browser]
           enki browser acquire | enki browser release (chrome driver only)
 
@@ -121,27 +122,55 @@ async function doctor() {
   return checks.every(check => check.ok) ? EXIT.ok : EXIT.failed
 }
 
-function openInBrowser(url) {
-  const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open'
+async function openInBrowser(url) {
+  // ENKI_OPEN_BIN stands in for the system's opener in tests.
+  const opener = process.env.ENKI_OPEN_BIN || (process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open')
   try {
     spawn(opener, [url], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref()
   } catch {
     // No opener: the URL is printed anyway.
+    return
+  }
+  // The browser may be on another virtual desktop, where the desktop won't hand it the focus.
+  await raiseDashboardWindow()
+}
+
+/** The open task this pane orchestrates, when run inside an enki project; else null. */
+function boundTask(slug) {
+  const root = findProjectRoot()
+  if (!root) return null
+  try {
+    const found = resolveTask(root, { slug })
+    return found && found.phase !== 'done' ? found : null
+  } catch {
+    return null
   }
 }
+
+const taskPage = (url, found) => `${url}#/p/${encodeURIComponent(found.projectId)}/t/${encodeURIComponent(found.id)}`
 
 /** Works from any folder: the dashboard covers every project, so it needs none. */
 async function dashboard(args, flags) {
   if (args[0] === 'status') return console.log(await dashboardStatus())
   if (args[0] === 'stop') return console.log(await stopDashboard())
-  if (args.length > 0) throw new EnkiError('Usage: enki dashboard [--open] | enki dashboard status|stop', EXIT.usage)
+  if (args[0] === 'link') {
+    // For the band above the orchestrator's prompt: what to show, without starting anything.
+    const found = dashboardDisabled() ? null : boundTask(flags.task)
+    return console.log(JSON.stringify({ url: dashboardUrl(), task: found && { slug: found.slug, phase: found.phase, url: taskPage(dashboardUrl(), found) } }))
+  }
+  if (args.length > 0) throw new EnkiError('Usage: enki dashboard [--open] | enki dashboard status|stop|link', EXIT.usage)
   try {
     const result = await ensureDashboard()
-    if (flags.quiet) return EXIT.ok
-    if (result.status === 'disabled') return console.log('The dashboard is turned off (ENKI_DASHBOARD=off).')
+    // --quiet only silences the output: the prompt band's button relies on --open still opening.
+    if (result.status === 'disabled') {
+      if (!flags.quiet) console.log('The dashboard is turned off (ENKI_DASHBOARD=off).')
+      return flags.open ? EXIT.failed : EXIT.ok
+    }
     const said = { started: 'Started', updated: 'Updated and restarted', running: 'Running', starting: 'Starting' }[result.status]
-    console.log(`${said}: ${result.url}`)
-    if (flags.open) openInBrowser(result.url)
+    if (!flags.quiet) console.log(`${said}: ${result.url}`)
+    // From an orchestrator's pane, straight to its task's page.
+    const found = flags.open ? boundTask(flags.task) : null
+    if (flags.open) await openInBrowser(found ? taskPage(result.url, found) : result.url)
   } catch (error) {
     if (flags.quiet) return EXIT.failed
     throw error
