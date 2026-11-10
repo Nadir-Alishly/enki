@@ -98,6 +98,8 @@ enki dashboard --open
 
 It works from any folder. Any enki session or new task also starts it in the background, so it's usually already running at `http://localhost:4747/`.
 
+While an orchestrator has a task open, a band above its prompt shows the task and its phase, with a **Go to dashboard** button that opens the task's page. Collapse it with its `[-]`. Run from an orchestrator's pane, `enki dashboard --open` also opens that task's page, and `enki dashboard link` prints what the band shows. On KDE Plasma, where Wayland won't let a background process hand the browser the focus, enki asks KWin (through a small script over D-Bus) to bring the dashboard's window forward, switching virtual desktops if needed.
+
 - **Project view:** a year of finished tasks as a heatmap, tokens spent by agent role over 7, 30 or 90 days, and every task with its status, duration and tokens.
 - **Task view:** the agent team with each agent's live state, current plan step, tool call count and context in use against its model's window, then context by agent, the plan with each step's status, any alert that needs you, and the activity feed. Hover or click an agent's card or context total to pick it out everywhere on the page; Escape clears it.
 - **Project settings:** the one page that changes anything. It edits the project's `.enki/config.json`: each role's model, effort and skills (models and effort levels from Claude Code's own model list for your account, cached in `~/.claude/cache/model-catalog`, and skill suggestions from the skills installed on this computer), fix rounds, activation, worktrees, timeouts, the browser, the port range and database copying. Memory mode, repos and their test and dev server commands are shown but not editable. Changes apply to the next agent started. If the file changes elsewhere while you have unsaved edits, the page asks you to reload instead of overwriting it.
@@ -117,6 +119,7 @@ Tasks started before the dashboard existed show their history, but not their tok
 
 Enki has no telemetry and no server of its own. Everything below happens on your computer, in projects with `.enki/config.json`.
 
+- **The prompt band.** A hooks module (`hooks/dashboard-band.tsx`) runs `enki dashboard link` when a session starts and after each turn, to learn whether the session orchestrates an open task. Its button runs `enki dashboard --open`, which on KDE also loads a one-off KWin script over D-Bus to raise the dashboard's window, and removes it again.
 - **Hooks.** On every tool call in an enki project, the PreToolUse hook checks the call against the task policy and appends the tool's name and target to the task's `activity.jsonl`. The SessionStart hook gives the orchestrator its role and records its session ID on the task. Outside enki projects the hooks do nothing.
 - **Agents.** `enki team start` opens herdr panes and starts Claude Code in them with `--permission-mode` set to your `permissionMode` setting, `auto` by default. Enki never changes your Claude settings files and refuses `bypassPermissions`.
 - **Git.** Each task gets a worktree and a branch in your repo. Enki copies the gitignored files listed in `worktree.copy`, such as `.env` files, into the worktree, and commits to the task's branch when the task finishes. It never pushes.
