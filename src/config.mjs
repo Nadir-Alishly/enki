@@ -5,6 +5,18 @@ import { dirname, join, resolve } from 'node:path'
 export const ROLES = ['scout', 'coder', 'tester', 'qa', 'reviewer']
 export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk']
 export const BROWSER_DRIVERS = ['playwright', 'chrome', 'none']
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
+export const DATABASE_MODES = ['copy', 'shared', 'none']
+/**
+ * The dashboard's fallback list, for when Claude Code's own model catalog can't be read.
+ * Any other model name still works in config.json.
+ */
+export const MODELS = [
+  { id: 'claude-fable-5-2', label: 'Fable 5.2' },
+  { id: 'claude-opus-5-5', label: 'Opus 5.5' },
+  { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
+  { id: 'claude-haiku-5-5', label: 'Haiku 5.5' },
+]
 
 export const DEFAULTS = {
   version: 1,
@@ -47,7 +59,7 @@ const DEFAULT_TEST_GLOBS = [
 const TOP_KEYS = new Set(['$schema', 'id', ...Object.keys(DEFAULTS)])
 const REPO_KEYS = new Set(['name', 'path', 'test', 'lint', 'url', 'testGlobs', 'devServer', 'gate', 'worktree'])
 const WORKTREE_KEYS = new Set(['copy', 'link', 'install', 'env'])
-const DATABASE_KEYS = new Set(['copy', 'drop', 'env'])
+const DATABASE_KEYS = new Set(['copy', 'drop', 'env', 'enabled', 'default'])
 const isStringMap = value => value !== null && typeof value === 'object' && !Array.isArray(value) && Object.values(value).every(item => typeof item === 'string')
 
 function validateWorktree(value, label, problems) {
@@ -68,7 +80,7 @@ const GATE_KEYS = new Set(['commands', 'fast', 'suppressions'])
 const POLICY_KEYS = new Set(['secrets', 'protected', 'bash'])
 const TEAM_KEYS = new Set(['model', 'effort', 'skills'])
 const BROWSER_KEYS = new Set(['driver', 'headless', 'executable'])
-const SKILL_NAME = /^[A-Za-z0-9][\w.-]*(:[A-Za-z0-9][\w.-]*)?$/
+export const SKILL_NAME = /^[A-Za-z0-9][\w.-]*(:[A-Za-z0-9][\w.-]*)?$/
 
 export class ConfigError extends Error {
   constructor(problems) {
@@ -192,6 +204,8 @@ export function validateConfig(raw) {
       continue
     }
     checkUnknown(settings, TEAM_KEYS, `team.${role}`, problems)
+    if (settings.model !== undefined && (typeof settings.model !== 'string' || settings.model.trim() === '')) problems.push(`team.${role}.model: must be a model name`)
+    if (settings.effort !== undefined && !EFFORTS.includes(settings.effort)) problems.push(`team.${role}.effort: must be one of ${EFFORTS.join(', ')}`)
     if (settings.skills !== undefined && !(isStringArray(settings.skills) && settings.skills.every(name => SKILL_NAME.test(name)))) {
       problems.push(`team.${role}.skills: must be an array of skill names, like "frontend-design" or "design:ux-copy"`)
     }
@@ -227,6 +241,8 @@ export function validateConfig(raw) {
         if (raw.database[key] !== undefined && typeof raw.database[key] !== 'string') problems.push(`database.${key}: must be a command`)
       }
       if (raw.database.env !== undefined && !isStringMap(raw.database.env)) problems.push('database.env: must map names to strings')
+      if (raw.database.enabled !== undefined && typeof raw.database.enabled !== 'boolean') problems.push('database.enabled: must be true or false')
+      if (raw.database.default !== undefined && !DATABASE_MODES.includes(raw.database.default)) problems.push(`database.default: must be one of ${DATABASE_MODES.join(', ')}`)
     }
   }
   if (problems.length > 0) throw new ConfigError(problems)

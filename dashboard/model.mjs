@@ -272,34 +272,16 @@ export function taskDetail(project, taskId, live, tokens) {
 
 const dayKey = date => date.toLocaleDateString('sv-SE')
 
-function settings(project, orchestratorModel = null) {
-  let config
+/** Each repo's checked-out branch, for the project header. */
+function repoBranches(project) {
   try {
-    config = loadProjectConfig(project.root)
-  } catch (error) {
-    return { rows: [{ label: 'Config', value: `Invalid: ${error.message.split('\n')[0]}` }], models: [], repos: [] }
+    return loadProjectConfig(project.root).repos.map(repo => {
+      const dir = join(project.root, repo.path)
+      return { name: repo.name, branch: existsSync(dir) ? git(dir, ['branch', '--show-current'], { allowFail: true }) || null : null }
+    })
+  } catch {
+    return []
   }
-  const repos = []
-  const rows = []
-  for (const repo of config.repos) {
-    const branch = git(join(project.root, repo.path), ['branch', '--show-current'], { allowFail: true })
-    repos.push({ name: repo.name, branch: branch || null })
-    rows.push({ label: `Repo ${repo.name}`, value: `${repo.path}${branch ? `, on ${branch}` : ''}` })
-    if (repo.test.length) rows.push({ label: 'Tests', value: repo.test.join(', ') })
-    if (repo.devServer.start) rows.push({ label: 'Dev server', value: repo.devServer.start })
-  }
-  rows.push({ label: 'Manual testing', value: config.browser.driver === 'playwright' ? 'Playwright, headless' : config.browser.driver === 'chrome' ? 'Claude in Chrome' : 'None' })
-  rows.push({ label: 'Memory', value: config.memory })
-  rows.push({ label: 'Worktrees', value: config.worktrees ? `On, ports ${config.ports.from}-${config.ports.to}` : 'Off' })
-  rows.push({ label: 'Fix rounds', value: `Up to ${config.maxFixRounds}` })
-  const orchestrator = { role: 'orchestrator', label: ROLE_LABELS.orchestrator, model: orchestratorModel, skills: [] }
-  return { rows, repos, models: [orchestrator, ...ROLES.map(role => ({ role, label: ROLE_LABELS[role], model: config.team[role].model, skills: config.team[role].skills }))] }
-}
-
-/** The model the user's own sessions ran on most recently: the orchestrator has no configured model. */
-function latestOrchestratorModel(withEvents, live, tokens) {
-  const usage = withEvents.flatMap(({ task, events }) => orchestratorSessions(events, task, live).map(session => tokens.session(session))).filter(item => item?.model)
-  return usage.sort((a, b) => (a.at ?? '').localeCompare(b.at ?? '')).at(-1)?.model ?? null
 }
 
 /** Everything for the project view: tasks, a year of finished tasks, 90 days of tokens by role. */
@@ -361,7 +343,7 @@ export function projectDetail(project, live, tokens) {
     agentsWorking,
     heatmap,
     tokensByDay,
-    settings: settings(project, latestOrchestratorModel(withEvents, live, tokens)),
+    repos: repoBranches(project),
   }
 }
 

@@ -237,12 +237,13 @@ test('a port placeholder for an unknown repo is an error', () => {
 
 // Databases
 
-function databaseProject(plan) {
+function databaseProject(plan, extra = {}) {
   const project = gitProject({
     database: {
       copy: 'echo copied {task} >> db.log',
       drop: 'echo dropped {task} >> db.log',
       env: { DATABASE_URL: 'postgres://localhost/app_{task}' },
+      ...extra,
     },
   })
   project.enki(['task', 'new', 'dark-mode'])
@@ -269,6 +270,20 @@ test('Database: copy makes a copy at team start, points env at it, and drops it 
 
 test('a missing Database line means copy', () => {
   assert.equal(databaseProject('# Plan\n').state('dark-mode').database, 'copy')
+})
+
+test('a missing Database line takes the project default', () => {
+  assert.equal(databaseProject('# Plan\n', { default: 'none' }).state('dark-mode').database, 'none')
+  assert.equal(databaseProject('# Plan\n\nDatabase: copy\n', { default: 'none' }).state('dark-mode').database, 'copy', 'the plan line wins')
+})
+
+test('with copying off, a copy becomes the shared database and none stays none', () => {
+  const project = databaseProject('# Plan\n\nDatabase: copy\n', { enabled: false })
+  assert.equal(project.state('dark-mode').database, 'shared')
+  project.enki(['team', 'start'])
+  assert.equal(dbLog(project), '', 'nothing is copied')
+  assert.equal(databaseProject('# Plan\n', { enabled: false }).state('dark-mode').database, 'shared')
+  assert.equal(databaseProject('# Plan\n\nDatabase: none\n', { enabled: false }).state('dark-mode').database, 'none')
 })
 
 test('Database: none blanks the keys, so nothing reaches the real database', () => {
@@ -498,10 +513,14 @@ test('worktree, ports and database settings are validated', async () => {
     { worktree: { extra: true } },
     { database: { copy: 1 } },
     { database: { drop: 'x', other: 1 } },
+    { database: { enabled: 'no' } },
+    { database: { default: 'copies' } },
+    { team: { coder: { effort: 'huge' } } },
+    { team: { coder: { model: '' } } },
     { repos: [{ path: 'web', worktree: { install: 5 } }] },
   ]
   for (const config of bad) assert.throws(() => validateConfig(config), ConfigError, JSON.stringify(config))
-  validateConfig({ worktrees: true, ports: { from: 4400, to: 4410 }, worktree: { copy: ['.env*'], link: ['node_modules'], install: 'npm ci', env: { A: '{port}' } }, database: { copy: 'a', drop: 'b', env: { DB: 'c' } } })
+  validateConfig({ worktrees: true, ports: { from: 4400, to: 4410 }, worktree: { copy: ['.env*'], link: ['node_modules'], install: 'npm ci', env: { A: '{port}' } }, database: { copy: 'a', drop: 'b', env: { DB: 'c' }, enabled: false, default: 'shared' }, team: { coder: { effort: 'xhigh' } } })
 })
 
 test('init ignores worktrees', () => {

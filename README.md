@@ -33,7 +33,7 @@ Every task gets its own git worktree, branch, port and, if the plan says so, dat
 - **What git doesn't carry:** enki copies the gitignored files in `worktree.copy`, such as `.env*`, and links the folders in `worktree.link`, such as `node_modules`. If the approved plan has `Scope: deps`, the task gets its own install with `worktree.install`.
 - **Ports:** each task's server gets a free port from `ports`, through `{port}` in `devServer.start` and the `PORT` variable. A machine-wide registry stops two tasks picking the same one.
 - **Per-task settings:** `worktree.env` sets values in the copied env files and the task's processes. It can use `{port}`, `{port:<repo>}` and `{task}`.
-- **Databases:** with a `database` section, each plan says `Database: copy`, `shared` or `none`. `copy` runs your `copy` command at team start and `drop` at the end. `none` blanks the database env values, so nothing reaches the real database by accident.
+- **Databases:** with a `database` section, each plan says `Database: copy`, `shared` or `none`. `copy` runs your `copy` command at team start and `drop` at the end. `none` blanks the database env values, so nothing reaches the real database by accident. A plan without the line gets `database.default`, `copy` unless you set it. `"enabled": false` turns copying off but keeps the commands: plans then use the shared database, or none.
 - **Finishing:** enki removes its copies and links, commits everything else to the task's branch under your git identity, with your git hooks, and removes the worktree. The output gives the branch and `git diff <base>...<slug>` to review it. If a hook refuses the commit, the task stays open. An empty task's branch is deleted, and `--abandon` commits the work as WIP.
 
 ```json
@@ -90,7 +90,7 @@ Nothing else can start or stop servers: each project's own commands are blocked 
 
 ## Dashboard
 
-Enki has a local, read-only web dashboard covering every enki project on this computer. Open it with:
+Enki has a local web dashboard covering every enki project on this computer. Open it with:
 
 ```
 enki dashboard --open
@@ -98,14 +98,15 @@ enki dashboard --open
 
 It works from any folder. Any enki session or new task also starts it in the background, so it's usually already running at `http://localhost:4747/`.
 
-- **Project view:** a year of finished tasks as a heatmap, tokens spent by agent role over 7, 30 or 90 days, every task with its status, duration and tokens, and the project's settings and models.
+- **Project view:** a year of finished tasks as a heatmap, tokens spent by agent role over 7, 30 or 90 days, and every task with its status, duration and tokens.
 - **Task view:** the agent team with each agent's live state, current plan step, tool call count and context in use against its model's window, then context by agent, the plan with each step's status, any alert that needs you, and the activity feed. Hover or click an agent's card or context total to pick it out everywhere on the page; Escape clears it.
+- **Project settings:** the one page that changes anything. It edits the project's `.enki/config.json`: each role's model, effort and skills (models and effort levels from Claude Code's own model list for your account, cached in `~/.claude/cache/model-catalog`, and skill suggestions from the skills installed on this computer), fix rounds, activation, worktrees, timeouts, the browser, the port range and database copying. Memory mode, repos and their test and dev server commands are shown but not editable. Changes apply to the next agent started. If the file changes elsewhere while you have unsaved edits, the page asks you to reload instead of overwriting it.
 
 Agent states are herdr's own (Running, Idle, Done, Needs you), plus Stopped, and Error for an agent that vanished from an open task. They follow herdr within about 2 seconds. Plan steps come from the approved plan's **Steps** list: each `enki ask --step N` marks a step active, and the agent's report marks it done.
 
 How it works:
 
-- One server per computer, owned by no session. It listens only on `127.0.0.1`, refuses requests for any other host name, sends no CORS headers and accepts no changes. It exits after 30 minutes with no open task and no open page.
+- One server per computer, owned by no session. It listens only on `127.0.0.1`, refuses requests for any other host name and sends no CORS headers. Its only write is a settings save, which it accepts only from its own page: the request must come from the dashboard's own origin, as JSON, with a token only that page can read. The project comes from enki's registry, never from the request, and only the fields on the page can change. It exits after 30 minutes with no open task and no open page.
 - It reads what enki already writes: the project registry in `~/.enki/projects.json`, each task's state, event log and activity log, and herdr's agent list. Tokens come from Claude Code's own session transcripts. A cache in `~/.enki/dashboard.db` saves rereading them, and can be deleted at any time.
 - `enki dashboard status` and `enki dashboard stop` check or stop it. After a plugin update, the next start replaces an older server.
 - `ENKI_DASHBOARD_PORT` picks another port. `ENKI_DASHBOARD=off` stops enki from starting it.
@@ -120,7 +121,7 @@ Enki has no telemetry and no server of its own. Everything below happens on your
 - **Agents.** `enki team start` opens herdr panes and starts Claude Code in them with `--permission-mode` set to your `permissionMode` setting, `auto` by default. Enki never changes your Claude settings files and refuses `bypassPermissions`.
 - **Git.** Each task gets a worktree and a branch in your repo. Enki copies the gitignored files listed in `worktree.copy`, such as `.env` files, into the worktree, and commits to the task's branch when the task finishes. It never pushes.
 - **Your commands.** `enki verify` runs your configured test commands. Team start runs your dev server, install and database copy commands when the config and plan ask for them.
-- **Files outside your projects.** Enki writes to `~/.enki/`: the project registry, the port registry, the dashboard's cache and log, and the Playwright install. The dashboard reads Claude Code's transcripts in `~/.claude/projects/` to count tokens.
+- **Files outside your projects.** Enki writes to `~/.enki/`: the project registry, the port registry, the dashboard's cache and log, and the Playwright install. The dashboard reads Claude Code's transcripts in `~/.claude/projects/` to count tokens, and its model list in `~/.claude/cache/model-catalog/` for the settings page.
 - **Network.** `enki playwright install` downloads `@playwright/mcp` 0.0.83 from the npm registry, and Chromium only with `--browser`. The dashboard page loads the Geist font from Google Fonts. Enki checks your dev server on localhost. Nothing else leaves your computer through enki.
 
 ## Requirements
@@ -218,10 +219,11 @@ The orchestrator drives the `enki` CLI, which is on the Bash `PATH` while the pl
 |---|---|---|
 | `mode` | `auto` | `auto`: every session here is the orchestrator. `explicit`: only after `/enki:task` |
 | `repos[]` | | `path` (required), `name`, `test`, `lint`, `url`, `testGlobs`, `devServer`, `gate` |
-| `team` | Haiku for scout, tester and QA, Sonnet for coder and reviewer, no skills | `model`, `effort` and `skills` per role |
+| `team` | Haiku for scout, tester and QA, Sonnet for coder and reviewer, no skills | `model`, `effort` (`low`, `medium`, `high`, `xhigh` or `max`) and `skills` per role |
 | `permissionMode` | `auto` | Permission mode for workers |
 | `timeouts` | 15 to 30 minutes, 2 for server start | Milliseconds per step |
 | `maxFixRounds` | `3` | Fix rounds before enki stops |
+| `database` | | `copy`, `drop` and `env` for per-task databases, `default` (`copy`, `shared` or `none`) for plans without a Database line, and `enabled` (`false` stops copying) |
 | `policy` | | `secrets` and `protected` globs, and `bash` rules with `pattern` and `reason`. These can only add restrictions |
 
 Also in `.enki/`:
@@ -265,7 +267,7 @@ Be clear about the limits. Enki is a set of guardrails for a cooperative agent, 
 - **Rules that are only instructions:** the fix-brief style, browser etiquette such as reusing the empty tab, data handling in tests, and "local network only".
 - **Blindness has the same limit.** A script, or a path built from variables, can still read the coder's files, and it needs a git repo to know what changed. Tests also see behaviour by running the code, which is the point.
 - **Paths built from variables aren't judged.** A write to `$DIR/file`, or after `cd "$DIR"`, passes the path rules, so agents can use scratch folders freely. Deletes through variables are still refused.
-- **`.enki/config.json` is trusted.** Enki runs `devServer.start` and `devServer.stop` outside the hooks, and the orchestrator can edit that file, because it records what it learns there. Review changes to it the way you'd review a script.
+- **`.enki/config.json` is trusted.** Enki runs `devServer.start` and `devServer.stop` outside the hooks, and the orchestrator can edit that file, because it records what it learns there. So can you, from the dashboard's settings page, including the database commands. Review changes to it the way you'd review a script.
 - **Workers can't be stopped from reading non-secret files** outside their task. Reading is unrestricted apart from secrets.
 
 Which prompts the orchestrator approves on its own is its judgement, guided by instructions. The limits on that are the one-time rule, the log and the policy hook. Direct `herdr` input commands are denied, so `enki answer` can't be sidestepped through the Bash patterns enki knows about.

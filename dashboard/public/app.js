@@ -1,5 +1,6 @@
-// The Enki dashboard page. View-only: the only controls are navigation and the chart's time range.
-// Everything agents or users wrote goes in as text, never as HTML.
+// The Enki dashboard page. The project and task views are view-only; the settings page is the one
+// form, and it lives in settings.js. Everything agents or users wrote goes in as text, never as HTML.
+import { createSettings } from './settings.js'
 
 const ROLE = {
   orchestrator: { label: 'Orchestrator', fill: 'var(--orange)', deep: 'var(--maroon)' },
@@ -31,6 +32,18 @@ const TASK_STATE = {
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const SIDEBAR_LIMIT = 5
+
+const settings = createSettings({
+  h: (...args) => h(...args),
+  svg: (...args) => svg(...args),
+  chip: (...args) => chip(...args),
+  getJson: path => getJson(path),
+  // The sidebar's "N unsaved" badge follows the draft.
+  onDirty: () => {
+    renderSidebar()
+    fitTasks()
+  },
+})
 
 const view = {
   projects: [],
@@ -91,12 +104,12 @@ function append(node, children) {
   }
 }
 
-function svg(size, paths, { stroke = 'currentColor', width = 2, cls } = {}) {
+function svg(size, paths, { stroke = 'currentColor', width = 2, cls, box = 16 } = {}) {
   const ns = 'http://www.w3.org/2000/svg'
   const node = document.createElementNS(ns, 'svg')
   node.setAttribute('width', size)
   node.setAttribute('height', size)
-  node.setAttribute('viewBox', '0 0 16 16')
+  node.setAttribute('viewBox', `0 0 ${box} ${box}`)
   node.setAttribute('fill', 'none')
   node.setAttribute('stroke', stroke)
   node.setAttribute('stroke-width', width)
@@ -171,11 +184,12 @@ function chip(role, size) {
 
 function route() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent)
-  return { project: parts[0] === 'p' ? parts[1] : null, task: parts[2] === 't' ? parts[3] : null }
+  return { project: parts[0] === 'p' ? parts[1] : null, task: parts[2] === 't' ? parts[3] : null, settings: parts[2] === 'settings' }
 }
 
 const projectHref = id => `#/p/${encodeURIComponent(id)}`
 const taskHref = (project, task) => `${projectHref(project)}/t/${encodeURIComponent(task)}`
+const settingsHref = id => `${projectHref(id)}/settings`
 
 async function getJson(path) {
   const response = await fetch(path, { cache: 'no-store' })
@@ -193,7 +207,9 @@ async function load() {
     const list = await getJson('/api/projects')
     const r = route()
     const projectId = r.project ?? list.projects[0]?.id
-    const project = projectId && list.projects.some(p => p.id === projectId) ? await getJson(`/api/projects/${encodeURIComponent(projectId)}`) : null
+    const entry = list.projects.find(p => p.id === projectId)
+    // The settings page loads its own data, and keeps it while live updates come in.
+    const project = !entry ? null : r.settings ? { id: entry.id, name: entry.name } : await getJson(`/api/projects/${encodeURIComponent(projectId)}`)
     const task = project && r.task ? await getJson(`/api/projects/${encodeURIComponent(project.id)}/tasks/${encodeURIComponent(r.task)}`).catch(() => null) : null
     if (ticket !== loading) return
     Object.assign(view, { projects: list.projects, herdr: list.herdr, project, task, error: null })
@@ -229,7 +245,7 @@ function renderSidebar() {
                 'aria-selected': String(selected),
                 onClick: () => {
                   view.menuOpen = false
-                  location.hash = projectHref(project.id)
+                  location.hash = r.settings ? settingsHref(project.id) : projectHref(project.id)
                 },
               },
               h('span', { class: 'option__text' }, h('span', { class: 'option__name' }, project.name), h('span', { class: 'option__sub' }, sub)),
@@ -262,7 +278,7 @@ function renderSidebar() {
     nodes.push(
       h(
         'a',
-        { class: 'navitem', href: projectHref(current.id), 'aria-current': r.task ? null : 'page' },
+        { class: 'navitem', href: projectHref(current.id), 'aria-current': r.task || r.settings ? null : 'page' },
         svg(16, [['rect', { x: 1.5, y: 1.5, width: 13, height: 13 }], ['path', { d: 'M1.5 6.5h13M6.5 6.5v8' }]], { width: 1 }),
         'Project overview',
       ),
@@ -321,33 +337,19 @@ function renderSidebar() {
     )
   }
 
-  const settings = view.project?.settings
-  if (settings) {
+  if (current) {
+    const count = settings.unsaved(current.id)
     nodes.push(
       h(
-        'section',
-        { class: 'settings', 'aria-labelledby': 'settings-h' },
+        'div',
+        { class: 'side__foot' },
         h(
-          'div',
-          { class: 'settings__head' },
-          svg(16, [['circle', { cx: 8, cy: 8, r: 2.2 }], ['path', { d: 'M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4' }]], { stroke: 'var(--ink-muted)', width: 1.6 }),
-          h('h2', { id: 'settings-h' }, 'Project settings'),
+          'a',
+          { class: 'navitem', href: settingsHref(current.id), 'aria-current': r.settings ? 'page' : null },
+          gear(),
+          h('span', { class: 'navitem__text' }, 'Project settings'),
+          count > 0 && h('span', { class: 'navitem__badge' }, `${count} unsaved`),
         ),
-        h(
-          'dl',
-          {},
-          settings.rows.map(row => h('div', { class: 'setting', title: `${row.label}: ${row.value}` }, h('dt', {}, row.label), h('dd', {}, row.value))),
-        ),
-        settings.models.length > 0 &&
-          h(
-            'div',
-            { class: 'models' },
-            settings.models.map(item => {
-              const model = item.model ? shortModel(item.model) : item.role === 'orchestrator' ? 'Your session' : '—'
-              const note = item.role === 'orchestrator' ? `Orchestrator: ${item.model ? `${model}, the model your own Claude session used last` : 'your own Claude session, whichever model it runs'}` : `${item.label}: ${item.model}`
-              return h('div', { class: 'model', title: note }, chip(item.role, 10), h('span', { class: 'model__role' }, item.label), h('span', { class: 'model__name muted' }, model))
-            }),
-          ),
       ),
     )
   }
@@ -412,11 +414,23 @@ function shortModel(model) {
 
 // ---------- shared page parts ----------
 
+/** Shown only when something is wrong with live updates. */
 function liveBadge() {
-  if (!view.connected) return h('span', { class: 'pill pill--off' }, eye(), 'Read-only · reconnecting')
-  if (!view.herdr) return h('span', { class: 'pill pill--off', title: 'herdr could not be reached, so live agent states are unknown' }, eye(), 'Read-only · herdr offline')
-  return h('span', { class: 'pill' }, eye(), 'Read-only · updates live')
+  if (!view.connected) return h('span', { class: 'pill pill--off', role: 'status' }, eye(), 'Reconnecting…')
+  if (!view.herdr) return h('span', { class: 'pill pill--off', role: 'status', title: 'herdr could not be reached, so live agent states are unknown' }, eye(), 'herdr offline')
+  return null
 }
+
+// A cog, from the Lucide icon set (ISC licence).
+const gear = () =>
+  svg(
+    16,
+    [
+      ['path', { d: 'M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z' }],
+      ['circle', { cx: 12, cy: 12, r: 3 }],
+    ],
+    { box: 24, width: 2 },
+  )
 
 function stats(items) {
   return h(
@@ -827,7 +841,7 @@ function renderProject(project) {
   const spent30 = project.tokensByDay.slice(-30).reduce((total, day) => total + Object.values(day.roles).reduce((a, b) => a + b, 0), 0)
   const running = project.tasks.filter(task => task.status === 'running').length
   const waiting = project.tasks.filter(task => task.status === 'needs-you').length
-  const repos = project.settings.repos ?? []
+  const repos = project.repos ?? []
   const where = [project.root, repos.length === 1 && repos[0].branch ? `on ${repos[0].branch}` : repos.length > 1 ? plural(repos.length, 'repo') : null].filter(Boolean).join(' · ')
 
   const header = h(
@@ -843,7 +857,7 @@ function renderProject(project) {
         h('h1', {}, project.name),
         h('span', { class: 'line' }, dot(running ? 'var(--green)' : 'var(--ink-muted)', running > 0), `${running} running · ${waiting} need you · ${plural(project.agentsWorking, 'agent')} working`),
       ),
-      liveBadge(),
+      h('div', { class: 'head__actions' }, liveBadge(), h('a', { class: 'btn btn--secondary', href: settingsHref(project.id) }, gear(), 'Project settings')),
     ),
     stats([
       { label: 'Tasks finished', value: String(last30), note: change === null ? 'in the last 30 days' : `${change >= 0 ? '+' : ''}${change}% vs previous 30 days` },
@@ -866,18 +880,22 @@ function render() {
   else if (view.projects.length === 0) content = [h('h1', {}, 'Enki'), h('p', { class: 'empty' }, 'No enki projects yet. Run /enki:init in a project, then ask the orchestrator for a task. Projects show up here after their first task.')]
   else if (!view.project) content = [h('h1', {}, 'Not found'), h('p', { class: 'empty' }, 'That project is not registered with enki on this computer. ', h('a', { href: '#/' }, 'Go to the first project'))]
   else if (r.task && !view.task) content = [h('h1', {}, 'Not found'), h('p', { class: 'empty' }, 'That task is not in this project. ', h('a', { href: projectHref(view.project.id) }, 'Back to the project'))]
+  else if (r.settings) content = [settings.mount(view.project.id, view.project.name)]
   else content = view.task ? renderTask(view.task) : renderProject(view.project)
-  main.replaceChildren(...content.filter(Boolean))
+  // The settings page is the same element each time, so re-renders never touch what's being typed.
+  const nodes = content.filter(Boolean)
+  if (!(nodes.length === 1 && main.childElementCount === 1 && main.firstElementChild === nodes[0])) main.replaceChildren(...nodes)
   applyFocus()
   fitTasks()
-  document.title = view.task ? `${view.task.title} · Enki` : view.project ? `${view.project.name} · Enki` : 'Enki dashboard'
+  document.title = r.settings && view.project ? `Settings · ${view.project.name} · Enki` : view.task ? `${view.task.title} · Enki` : view.project ? `${view.project.name} · Enki` : 'Enki dashboard'
 }
 
 function connect() {
   const stream = new EventSource('/api/stream')
   let seen = null
   stream.onmessage = message => {
-    const { version } = JSON.parse(message.data)
+    const { version, configs } = JSON.parse(message.data)
+    if (configs) settings.configsChanged(configs)
     if (!view.connected) {
       view.connected = true
       render()
