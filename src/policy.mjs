@@ -4,25 +4,34 @@
 import { readFileSync, realpathSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { parseCommand, writeTargets } from './shell.mjs'
+import { stepCapabilities, teamOf } from './agents.mjs'
+import { parseCommand, topLevelCommands, writeTargets } from './shell.mjs'
 
 const DEFAULT_POLICY = JSON.parse(readFileSync(new URL('../policy/default.json', import.meta.url), 'utf8'))
 
-export const WORKER_ROLES = ['scout', 'coder', 'tester', 'qa', 'reviewer']
+/** Blind steps judge the result from the requirements, so they don't get to see how it was built. */
+export const isBlindStep = (state, step) => Boolean(stepCapabilities(state, step)?.blind)
 
-/** These roles judge the result from the requirements, so they don't get to see how it was built. */
-export const BLIND_ROLES = new Set(['tester', 'qa'])
-const HIDDEN_TASK_FILES = /^(coder|reviewer|role-coder|role-reviewer|approved-plan\.md$|plan\.md$)/
+const escape = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * What a blind step may not read in the task folder: the plan, and the reports, briefs and role
+ * files of the steps that see the work (those that aren't blind), apart from intake steps,
+ * which report before anything is built.
+ */
+function hiddenSteps(state) {
+  return Object.entries(teamOf(state))
+    .filter(([, entry]) => !entry.capabilities?.blind && !entry.intake)
+    .map(([step]) => step)
+}
 
 const WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 const READ_TOOLS = new Set(['Read', 'NotebookRead'])
 const STATE_FILES = new Set(['state.json', 'events.jsonl', 'approved-plan.md', 'rules.md'])
-const REPORT_PREFIXES = {
-  scout: ['scout'],
-  coder: ['coder'],
-  tester: ['tester', 'tests', 'baseline', 'gate-'],
-  qa: ['qa'],
-  reviewer: ['reviewer'],
+/** The task-folder files a step may write: its own, and for a step that writes tests, the test notes. */
+function reportPrefixes(ctx) {
+  const write = stepCapabilities(ctx.state, ctx.role)?.write
+  return [ctx.role, ...(write === 'tests' || write === 'all' ? ['tests', 'baseline', 'gate-'] : [])]
 }
 
 export function globToRegExp(glob) {
@@ -123,7 +132,7 @@ function workerWrite(ctx, path) {
 
   if (isInside(path, state.taskDir)) {
     const name = relative(state.taskDir, path).split(sep)[0].replace(/^\./, '')
-    const allowed = REPORT_PREFIXES[role].some(prefix => name.startsWith(prefix))
+    const allowed = reportPrefixes(ctx).some(prefix => name.startsWith(prefix))
     return allowed ? null : `${role} may only write its own reports in the task folder, not ${name}.`
   }
   // A task's own worktree lives under .enki, and is the only part of it a worker may write.
@@ -133,7 +142,8 @@ function workerWrite(ctx, path) {
       ? 'That is another task\'s worktree.'
       : 'Notes, config and the playbook belong to the orchestrator. Suggest changes in your report.'
   }
-  if (role === 'scout' || role === 'reviewer' || role === 'qa') return `${role} is read-only, apart from its own report.`
+  const write = stepCapabilities(state, role)?.write ?? 'none'
+  if (write === 'none') return `${role} is read-only, apart from its own report.`
 
   const repo = repoFor(ctx, path)
   if (!repo) return 'This path is outside the repos of this task.'
@@ -141,10 +151,10 @@ function workerWrite(ctx, path) {
   if (inRepo === '.enki' || inRepo.startsWith('.enki/')) return 'The repo\'s memory (notes, commands, playbook) belongs to the orchestrator. Suggest changes in your report.'
   const isTest = matchesGlobs(inRepo, repo.testGlobs ?? [])
 
-  if (role === 'tester') {
-    return isTest ? null : `The tester only writes test files. Report the bug for the coder (${inRepo}).`
+  if (write === 'tests') {
+    return isTest ? null : `The ${role} only writes test files. Report the bug for the coder (${inRepo}).`
   }
-  if (isTest) return `Test files belong to the tester (${inRepo}). Say what's needed in your report.`
+  if (isTest && write !== 'all') return `Test files belong to the tester (${inRepo}). Say what's needed in your report.`
   if (matchesGlobs(inRepo, DEFAULT_POLICY.infra) && !state.scope.includes('infra')) {
     return `Infra files need "Scope: infra" in the approved plan (${inRepo}).`
   }
@@ -163,7 +173,7 @@ function checkWrite(ctx, rawPath) {
   return ctx.role === 'orchestrator' ? orchestratorWrite(ctx, path) : workerWrite(ctx, path)
 }
 
-const isBlind = ctx => BLIND_ROLES.has(ctx.role) && Boolean(ctx.state)
+const isBlind = ctx => Boolean(ctx.state) && isBlindStep(ctx.state, ctx.role)
 
 /** Why a blind role can't read this path, or null. Takes an absolute path. */
 function hiddenFrom(ctx, path) {
@@ -171,7 +181,11 @@ function hiddenFrom(ctx, path) {
   const { state } = ctx
   if (isInside(path, state.taskDir)) {
     const inTask = relative(state.taskDir, path).split(sep)
-    const hidden = HIDDEN_TASK_FILES.test(inTask[0]) || (inTask[0] === 'briefs' && /coder|reviewer/.test(inTask.at(-1)))
+    const steps = hiddenSteps(state).map(escape)
+    const own = steps.length > 0 && new RegExp(`^(?:role-)?(?:${steps.join('|')})(?:[-.]|$)`).test(inTask[0])
+    const plan = /^(approved-plan|plan)\.md$/.test(inTask[0])
+    const brief = inTask[0] === 'briefs' && steps.some(step => inTask.at(-1).includes(step))
+    const hidden = own || plan || brief
     return hidden ? `The ${ctx.role} works from requirements.md, so ${inTask.at(-1)} is hidden.` : null
   }
   return state.blindFiles?.includes(path) ? `The ${ctx.role} works from the requirements, so the coder's change to ${basename(path)} is hidden. Test what it does, not how it's written.` : null
@@ -187,10 +201,12 @@ function bashRules(ctx) {
 
 const isDynamic = word => /[$`]/.test(word)
 
-const NOT_A_SERVER = new Set(['cd', 'export', 'echo', 'sleep', 'true'])
+// Setup, housekeeping and the ends of shell blocks: never what a start script launches.
+const NOT_A_SERVER = new Set(['cd', 'export', 'echo', 'sleep', 'true', 'false', 'pwd', 'exit', 'return', 'set', 'unset', 'source', '.', ':', '[', '[[', 'test', 'fi', 'done', 'esac', 'wait'])
 
 /**
- * Each project's own start and stop commands, so the server ban fits any stack.
+ * Each project's own start and stop commands, so the server ban fits any stack. Only a script's
+ * top-level commands count: the build steps in a subshell or an if-body before the launch don't.
  * Only the leading words count: the same server on another port or with other flags still matches.
  */
 function serverCommands(ctx) {
@@ -198,7 +214,7 @@ function serverCommands(ctx) {
   for (const repo of ctx.config?.repos ?? []) {
     for (const command of [repo.devServer?.start, repo.devServer?.stop]) {
       if (!command) continue
-      for (const { tokens } of parseCommand(command)) {
+      for (const { tokens } of topLevelCommands(command)) {
         if (NOT_A_SERVER.has(tokens[0])) continue
         const end = tokens.findIndex((token, index) => index > 0 && /^-|^\d|:\d/.test(token))
         found.push(end === -1 ? tokens : tokens.slice(0, end))

@@ -178,7 +178,6 @@ test('config validation', async () => {
     [{ repos: [{ path: 'a', url: 'https://example.com' }] }, /localhost/],
     [{ repos: [{ path: 'a' }, { path: 'a' }] }, /duplicate/],
     [{ repos: [{ path: 'a', devServer: { managedBy: 'someone' } }] }, /"enki" or "user"/],
-    [{ team: { designer: {} } }, /unknown role/],
     [{ timeouts: { coder: -1 } }, /positive/],
     [{ timeouts: { lunch: 5 } }, /unknown step/],
     [{ maxFixRounds: 1.5 }, /integer/],

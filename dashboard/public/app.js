@@ -1,17 +1,54 @@
 // The Enki dashboard page. The project and task views are view-only; the settings page is the one
 // form, and it lives in settings.js. Everything agents or users wrote goes in as text, never as HTML.
+import { createAgents } from './agents.js'
+import { arrowDefs, autoLayout, drawGraph } from './graph.js'
+import { createLibrary } from './library.js'
 import { createSettings } from './settings.js'
+import { createStudio } from './studio.js'
 
-const ROLE = {
+/** A stripe for a patterned role, as QA's, in its own color. */
+const stripes = color => `repeating-linear-gradient(135deg, ${color} 0 4px, var(--black-950) 4px 7px)`
+
+/** A dashed outline in a role's color, as a background, so it works wherever a fill does. */
+const dashed = color =>
+  ['top', 'bottom'].map(side => `repeating-linear-gradient(90deg, ${color} 0 4px, transparent 4px 7px) ${side} / 100% 2px no-repeat`)
+    .concat(['left', 'right'].map(side => `repeating-linear-gradient(0deg, ${color} 0 4px, transparent 4px 7px) ${side} / 2px 100% no-repeat`))
+    .join(', ')
+
+/** Enki's own roles. A task's own steps (another role, or a second coder) are learned from the server. */
+const BUILTIN_ROLE = {
   orchestrator: { label: 'Orchestrator', fill: 'var(--orange)', deep: 'var(--maroon)' },
-  scout: { label: 'Scout', fill: 'var(--lavender)', deep: 'var(--indigo)' },
+  // The scout and the planner share lavender, as QA and the tester share green: the scout's is striped.
+  scout: { label: 'Scout', fill: stripes('var(--lavender)'), deep: 'var(--indigo)', line: 'var(--lavender)', pattern: 'stripes' },
+  planner: { label: 'Planner', fill: 'var(--lavender)', deep: 'var(--indigo)' },
   coder: { label: 'Coder', fill: 'var(--yellow)', deep: 'var(--brown)' },
   tester: { label: 'Tester', fill: 'var(--green)', deep: 'var(--forest)' },
   // Its fill is a stripe, which a border can't draw: outlines use the tester's green.
-  qa: { label: 'QA', fill: 'var(--qa-fill)', deep: 'var(--black-950)', line: 'var(--green)' },
+  qa: { label: 'QA', fill: 'var(--qa-fill)', deep: 'var(--black-950)', line: 'var(--green)', pattern: 'stripes' },
   reviewer: { label: 'Reviewer', fill: 'var(--white-100)', deep: 'var(--black-950)' },
 }
-const ROLE_ORDER = Object.keys(ROLE)
+const ROLE_ORDER = Object.keys(BUILTIN_ROLE)
+const learnedRoles = {}
+
+
+/** Remembers how the server labels and colors each step, so every view shows them the same way. */
+function learnRoles(styles) {
+  for (const [id, style] of Object.entries(styles ?? {})) {
+    // Enki's own look wins, and clears what another view learned under the same id.
+    if (BUILTIN_ROLE[id] && (style.role === id || id === 'orchestrator')) {
+      delete learnedRoles[id]
+      continue
+    }
+    const color = style.color ?? BUILTIN_ROLE[style.role]?.line ?? (BUILTIN_ROLE[style.role]?.fill?.startsWith('var(') ? BUILTIN_ROLE[style.role].fill : null) ?? 'var(--border)'
+    learnedRoles[id] = { label: style.label ?? id, fill: style.pattern === 'stripes' ? stripes(color) : style.pattern === 'dashed' ? dashed(color) : color, deep: 'var(--black-950)', line: color, pattern: style.pattern ?? null }
+  }
+}
+
+/** A step's label and colors: learned from the server, else enki's own, else neutral. */
+const roleOf = id => learnedRoles[id] ?? BUILTIN_ROLE[id] ?? { label: id, fill: 'var(--border)', deep: 'var(--black-950)', line: 'var(--border)' }
+
+/** The chart's roles: enki's own first, in their order, then the project's own. */
+const chartRoles = project => [...ROLE_ORDER, ...Object.keys(project.roles ?? {}).filter(id => !ROLE_ORDER.includes(id))]
 
 const AGENT_STATE = {
   running: { label: 'Running', color: 'var(--green)', pulse: true },
@@ -33,11 +70,49 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const SIDEBAR_LIMIT = 5
 
+const agents = createAgents({
+  h: (...args) => h(...args),
+  svg: (...args) => svg(...args),
+  getJson: path => getJson(path),
+  postJson: (path, body) => postJson(path, body),
+  learnRoles: styles => learnRoles(styles),
+  roleOf: id => roleOf(id),
+  agentsHref: id => agentsHref(id),
+  agentHref: (id, agent) => agentHref(id, agent),
+  newAgentHref: id => newAgentHref(id),
+  workflowHref: (id, workflow) => editHref(id, workflow),
+})
+
+const studio = createStudio({
+  h: (...args) => h(...args),
+  getJson: path => getJson(path),
+  postJson: (path, body) => postJson(path, body),
+  learnRoles: styles => learnRoles(styles),
+  roleOf: id => roleOf(id),
+  libraryHref: id => libraryHref(id),
+  editHref: (id, workflow) => editHref(id, workflow),
+  onSaved: id => library.refresh(id),
+  agentHref: (id, agent) => agentHref(id, agent),
+  newAgentHref: id => newAgentHref(id),
+})
+
+const library = createLibrary({
+  h: (...args) => h(...args),
+  svg: (...args) => svg(...args),
+  getJson: path => getJson(path),
+  postJson: (path, body) => postJson(path, body),
+  learnRoles: styles => learnRoles(styles),
+  roleOf: id => roleOf(id),
+  editHref: (id, workflow) => editHref(id, workflow),
+})
+
 const settings = createSettings({
   h: (...args) => h(...args),
   svg: (...args) => svg(...args),
   chip: (...args) => chip(...args),
   getJson: path => getJson(path),
+  learnRoles: styles => learnRoles(styles),
+  libraryHref: id => libraryHref(id),
   // The sidebar's "N unsaved" badge follows the draft.
   onDirty: () => {
     renderSidebar()
@@ -177,19 +252,46 @@ function badge(state) {
 }
 
 function chip(role, size) {
-  return h('span', { class: 'chip', 'aria-hidden': 'true', style: { width: `${size}px`, height: `${size}px`, background: ROLE[role]?.fill ?? 'transparent' } })
+  return h('span', { class: 'chip', 'aria-hidden': 'true', style: { width: `${size}px`, height: `${size}px`, background: roleOf(role)?.fill ?? 'transparent' } })
 }
 
 // ---------- routing and data ----------
 
 function route() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent)
-  return { project: parts[0] === 'p' ? parts[1] : null, task: parts[2] === 't' ? parts[3] : null, settings: parts[2] === 'settings' }
+  return {
+    project: parts[0] === 'p' ? parts[1] : null,
+    task: parts[2] === 't' ? parts[3] : null,
+    settings: parts[2] === 'settings',
+    library: parts[2] === 'library',
+    edit: parts[2] === 'workflows' ? parts[3] ?? null : null,
+    // The Agents page: the list, one agent's editor, or a new one.
+    agents: parts[2] === 'agents' ? { id: parts[3] ?? null } : parts[2] === 'new-agent' ? { id: '+new' } : null,
+  }
 }
 
 const projectHref = id => `#/p/${encodeURIComponent(id)}`
 const taskHref = (project, task) => `${projectHref(project)}/t/${encodeURIComponent(task)}`
 const settingsHref = id => `${projectHref(id)}/settings`
+const libraryHref = id => `${projectHref(id)}/library`
+const agentsHref = id => `${projectHref(id)}/agents`
+const agentHref = (id, agent) => `${agentsHref(id)}/${encodeURIComponent(agent)}`
+const newAgentHref = id => `${projectHref(id)}/new-agent`
+const editHref = (id, workflow) => `${projectHref(id)}/workflows/${encodeURIComponent(workflow)}`
+
+let editToken = null
+/** A write through the dashboard's guard: JSON, from this page, with its edit token. */
+async function postJson(path, body) {
+  try {
+    editToken ??= (await getJson('/api/session')).editToken
+    const response = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-enki-edit': editToken }, body: JSON.stringify(body) })
+    const parsed = await response.json().catch(() => ({}))
+    if (response.status === 403) editToken = null
+    return { ok: response.ok, status: response.status, body: parsed }
+  } catch (error) {
+    return { ok: false, status: 0, body: { error: error.message } }
+  }
+}
 
 async function getJson(path) {
   const response = await fetch(path, { cache: 'no-store' })
@@ -209,8 +311,10 @@ async function load() {
     const projectId = r.project ?? list.projects[0]?.id
     const entry = list.projects.find(p => p.id === projectId)
     // The settings page loads its own data, and keeps it while live updates come in.
-    const project = !entry ? null : r.settings ? { id: entry.id, name: entry.name } : await getJson(`/api/projects/${encodeURIComponent(projectId)}`)
+    const project = !entry ? null : r.settings || r.library || r.edit || r.agents ? { id: entry.id, name: entry.name } : await getJson(`/api/projects/${encodeURIComponent(projectId)}`)
     const task = project && r.task ? await getJson(`/api/projects/${encodeURIComponent(project.id)}/tasks/${encodeURIComponent(r.task)}`).catch(() => null) : null
+    learnRoles(project?.roles)
+    learnRoles(task?.roles)
     if (ticket !== loading) return
     Object.assign(view, { projects: list.projects, herdr: list.herdr, project, task, error: null })
   } catch (error) {
@@ -278,7 +382,7 @@ function renderSidebar() {
     nodes.push(
       h(
         'a',
-        { class: 'navitem', href: projectHref(current.id), 'aria-current': r.task || r.settings ? null : 'page' },
+        { class: 'navitem', href: projectHref(current.id), 'aria-current': r.task || r.settings || r.library || r.edit || r.agents ? null : 'page' },
         svg(16, [['rect', { x: 1.5, y: 1.5, width: 13, height: 13 }], ['path', { d: 'M1.5 6.5h13M6.5 6.5v8' }]], { width: 1 }),
         'Project overview',
       ),
@@ -343,6 +447,18 @@ function renderSidebar() {
       h(
         'div',
         { class: 'side__foot' },
+        h(
+          'a',
+          { class: 'navitem', href: libraryHref(current.id), 'aria-current': r.library || r.edit ? 'page' : null },
+          svg(16, [['rect', { x: 5.5, y: 1.5, width: 5, height: 3 }], ['rect', { x: 1.5, y: 11.5, width: 5, height: 3 }], ['rect', { x: 9.5, y: 11.5, width: 5, height: 3 }], ['path', { d: 'M8 4.5v3.5M4 11.5V8h8v3.5' }]], { width: 1 }),
+          h('span', { class: 'navitem__text' }, 'Workflows'),
+        ),
+        h(
+          'a',
+          { class: 'navitem', href: agentsHref(current.id), 'aria-current': r.agents ? 'page' : null },
+          svg(16, [['circle', { cx: 8, cy: 5, r: 3 }], ['path', { d: 'M2.5 14.5c.6-3 2.8-4.5 5.5-4.5s4.9 1.5 5.5 4.5' }]], { width: 1.2 }),
+          h('span', { class: 'navitem__text' }, 'Agents'),
+        ),
         h(
           'a',
           { class: 'navitem', href: settingsHref(current.id), 'aria-current': r.settings ? 'page' : null },
@@ -448,7 +564,7 @@ function sectionHead(id, title, note) {
 
 function agentCard(agent, lead) {
   const state = AGENT_STATE[agent.state] ?? AGENT_STATE.idle
-  const role = ROLE[agent.role]
+  const role = roleOf(agent.role)
   const quiet = agent.state === 'not-started' ? ' agent--absent' : agent.state === 'idle' || agent.state === 'done' || agent.state === 'stopped' ? ' agent--quiet' : ''
   const pct = agent.contextWindow ? Math.min(100, (agent.context / agent.contextWindow) * 100) : 0
   const model = agent.model ? shortModel(agent.model) : null
@@ -481,6 +597,56 @@ function agentCard(agent, lead) {
   )
 }
 
+// ---------- the workflow graph ----------
+
+const SVG_NS = 'http://www.w3.org/2000/svg'
+
+/** An SVG element. Text goes in as text, never markup. */
+function sv(tag, attrs = {}, ...children) {
+  const node = document.createElementNS(SVG_NS, tag)
+  for (const [key, value] of Object.entries(attrs)) if (value !== undefined && value !== null && value !== false) node.setAttribute(key, String(value))
+  for (const child of children.flat(Infinity)) {
+    if (child === null || child === undefined || child === false) continue
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)))
+  }
+  return node
+}
+
+const STEP_WORD = { running: 'running', queued: 'waiting', 'handed-off': 'with the orchestrator', waiting: 'waiting for you', done: 'done', idle: 'idle' }
+
+/**
+ * A task's workflow, drawn as in the studio and fitted to the page: no scrolling, no zoom. It is the
+ * team view too: each agent step shows its state, model, effort and context, and the orchestrator
+ * sits top left.
+ */
+function workflowGraph(task) {
+  const workflow = task.workflow
+  const definition = { nodes: workflow.nodes.map(({ id, kind, agent }) => ({ id, ...(kind ? { kind } : { agent }) })), edges: workflow.edges.map(({ from, on, to, max }) => ({ from, on, to, ...(max ? { max } : {}) })) }
+  const outcomesOfRole = node => workflow.nodes.find(item => item.id === node.id)?.outcomes ?? []
+  const auto = autoLayout(definition, outcomesOfRole)
+  const layout = Object.fromEntries(definition.nodes.map(node => [node.id, workflow.layout?.[node.id] ?? auto[node.id]]))
+  const styleOf = node => {
+    const look = roleOf(node.id)
+    return { label: look.label, color: look.line ?? look.fill, pattern: look.pattern ?? null, roleName: '' }
+  }
+  const { group, bounds } = drawGraph(definition, { layout, routes: workflow.routes ?? {}, outcomesOfRole, styleOf, status: workflow, format: { model: shortModel, tokens } })
+  const label = `Workflow ${workflow.name}: ${workflow.nodes.filter(node => !node.kind || node.kind === 'verify').map(node => `${node.label} ${STEP_WORD[node.status] ?? node.status}`).join(', ')}`
+  const svgNode = sv('svg', { class: 'wf-svg', viewBox: `${bounds.x} ${bounds.y} ${bounds.w} ${bounds.h}`, role: 'img', 'aria-label': label }, arrowDefs(), group)
+  svgNode.style.maxWidth = `${Math.round(bounds.w * 1.1)}px`
+  const open = workflow.nodes.filter(node => node.status === 'handed-off').length
+  return h(
+    'section',
+    { class: 'section', 'aria-labelledby': 'wf-h' },
+    h(
+      'div',
+      { class: 'section__head' },
+      h('h2', { id: 'wf-h' }, h('span', { class: 'section__kicker' }, 'Workflow'), workflow.name),
+      h('span', { class: 'section__note' }, [workflow.ended ? 'Reached its end' : open ? `${open} with the orchestrator` : null, h('a', { href: editHref(task.project.id, workflow.id) }, 'Open in the studio')].filter(Boolean).flatMap((item, index) => (index ? [' · ', item] : [item]))),
+    ),
+    h('div', { class: 'panel wf' }, svgNode, h('p', { class: 'wf-legend' }, '↩ an outcome with no line goes back to the orchestrator')),
+  )
+}
+
 function renderTask(task) {
   const state = TASK_STATE[task.status]
   const lead = task.agents.find(agent => agent.role === 'orchestrator')
@@ -494,7 +660,7 @@ function renderTask(task) {
     h('span', { 'aria-hidden': 'true' }, '·'),
     h('span', {}, `started ${ago(task.startedAt)}`),
   ]
-  const phase = task.status === 'done' || task.status === 'abandoned' ? null : `Phase: ${task.phase}${task.round > 1 ? `, fix round ${task.round}` : ''}`
+  const phase = task.status === 'done' || task.status === 'abandoned' ? null : `Phase: ${task.phase}`
 
   const header = h(
     'section',
@@ -502,7 +668,7 @@ function renderTask(task) {
     h(
       'div',
       { class: 'head' },
-      h('div', { class: 'head__text' }, h('div', { class: 'crumbs' }, meta), h('h1', { title: task.goal ?? '' }, task.title), h('div', { class: 'crumbs' }, badge(state), phase && h('span', {}, phase))),
+      h('div', { class: 'head__text' }, h('div', { class: 'crumbs' }, meta), h('h1', { title: task.goal ?? '' }, task.title), h('div', { class: 'crumbs' }, badge(state), phase && h('span', {}, phase), task.workflow && [h('span', { 'aria-hidden': 'true' }, '·'), h('span', {}, `Workflow: ${task.workflow.name}`)])),
       liveBadge(),
     ),
     task.alerts.length > 0 && h('div', { class: 'alerts' }, task.alerts.map(alert => h('div', { class: `alert alert--${alert.kind}`, role: 'status' }, h('strong', {}, alert.word), h('span', {}, alert.text)))),
@@ -526,21 +692,24 @@ function renderTask(task) {
       h('div', { class: 'lead' }, agentCard(lead, true), h('span', { class: 'vline', 'aria-hidden': 'true' })),
       h(
         'div',
-        { class: 'team', style: { gridTemplateColumns: `repeat(${workers.length}, minmax(0, 1fr))` } },
+        { class: 'team', style: { gridTemplateColumns: `repeat(${Math.min(workers.length, 5)}, minmax(0, 1fr))` } },
         workers.map(agent => h('div', { class: 'member' }, h('div', { class: 'rail', 'aria-hidden': 'true' }), agentCard(agent, false))),
       ),
     ),
   )
 
   const withContext = task.agents.filter(agent => agent.context > 0)
+  // Each card names the agent and, under it, the step that ran it.
+  const agentName = agent => task.roles?.[agent.role]?.name ?? roleOf(agent.role).label
+  const ctxLabel = agent => (agent.role === 'orchestrator' ? agentName(agent) : `${agentName(agent)} (${agent.role})`)
   const context = h(
     'section',
     { class: 'section panel', 'aria-labelledby': 'ctx-h', style: { gap: '12px' } },
     sectionHead('ctx-h', 'Context in use by agent', `${tokens(totalContext)} in context now, all agents together`),
     h(
       'div',
-      { class: `segments${withContext.length ? '' : ' segments--empty'}`, role: 'img', 'aria-label': `Context by agent: ${task.agents.map(agent => `${ROLE[agent.role].label} ${tokens(agent.context)}`).join(', ')}` },
-      withContext.map(agent => h('span', { class: 'segment', title: `${ROLE[agent.role].label}: ${tokens(agent.context)}`, ...focusable(agent.role, false), style: { flex: `${agent.context} 1 0`, background: ROLE[agent.role].fill, '--role': ROLE[agent.role].line ?? ROLE[agent.role].fill } })),
+      { class: `segments${withContext.length ? '' : ' segments--empty'}`, role: 'img', 'aria-label': `Context by agent: ${task.agents.map(agent => `${ctxLabel(agent)} ${tokens(agent.context)}`).join(', ')}` },
+      withContext.map(agent => h('span', { class: 'segment', title: `${ctxLabel(agent)}: ${tokens(agent.context)}`, ...focusable(agent.role, false), style: { flex: `${agent.context} 1 0`, background: roleOf(agent.role).fill, '--role': roleOf(agent.role).line ?? roleOf(agent.role).fill } })),
     ),
     h(
       'div',
@@ -548,12 +717,12 @@ function renderTask(task) {
       task.agents.map(agent =>
         h(
           'div',
-          { class: 'total', 'aria-label': `${ROLE[agent.role].label}: ${tokens(agent.context)} tokens of context`, ...focusable(agent.role) },
+          { class: 'total', 'aria-label': `${ctxLabel(agent)}: ${tokens(agent.context)} tokens of context`, ...focusable(agent.role) },
           chip(agent.role, 14),
           h(
             'span',
             { class: 'total__text' },
-            h('span', { class: 'total__label' }, ROLE[agent.role].label),
+            h('span', { class: 'total__label' }, agentName(agent), agent.role !== 'orchestrator' && h('span', { class: 'total__step' }, agent.role)),
             h('span', { class: 'total__value' }, tokens(agent.context), ' ', h('span', { class: 'total__pct' }, totalContext ? `${Math.round((agent.context / totalContext) * 100)}%` : '0%')),
           ),
         ),
@@ -575,7 +744,7 @@ function renderTask(task) {
               { 'data-role': step.owner },
               h('span', { class: `mark mark--${step.status}`, 'aria-hidden': 'true' }, step.status === 'done' && check('var(--black-950)')),
               h('span', { class: `plan__text plan__text--${step.status}` }, h('span', { class: 'sr-only' }, `Step ${step.n}, ${step.status === 'todo' ? 'to do' : step.status}: `), step.text),
-              h('span', { class: 'plan__owner' }, chip(step.owner, 12), ROLE[step.owner]?.label ?? step.owner),
+              h('span', { class: 'plan__owner' }, chip(step.owner, 12), roleOf(step.owner)?.label ?? step.owner),
             ),
           ),
         )
@@ -595,7 +764,8 @@ function renderTask(task) {
       : h('p', { class: 'empty' }, 'Nothing has happened yet.'),
   )
 
-  return [header, team, context, plan, feed]
+  // With a workflow, its graph is the team: each step shows its agent. Older tasks keep their cards.
+  return [header, task.workflow ? workflowGraph(task) : team, context, plan, feed]
 }
 
 // ---------- picking an agent ----------
@@ -612,7 +782,7 @@ function focusable(role, keyboard = true) {
   }
   return {
     'data-role': role,
-    style: { '--role': ROLE[role]?.line ?? ROLE[role]?.fill },
+    style: { '--role': roleOf(role)?.line ?? roleOf(role)?.fill },
     tabindex: keyboard ? '0' : null,
     role: keyboard ? 'button' : null,
     'aria-pressed': keyboard ? String(view.focus === role) : null,
@@ -637,7 +807,7 @@ function applyFocus() {
 }
 
 // Delegated, so it survives the live re-renders that replace the elements under the pointer.
-const PICKERS = '.agent[data-role], .segment[data-role], .total[data-role], .tbar__part[data-role]'
+const PICKERS = '.agent[data-role], .segment[data-role], .total[data-role], .tbar__part[data-role], .wf-node[data-role]'
 document.getElementById('main').addEventListener('mouseover', event => {
   const role = event.target.closest(PICKERS)?.dataset.role ?? null
   if (role === hovered) return
@@ -710,12 +880,12 @@ function niceTop(max) {
 function tokenChart(project) {
   const range = [7, 30, 90].includes(view.range) ? view.range : 30
   const days = project.tokensByDay.slice(-range)
-  const totals = days.map(day => ROLE_ORDER.reduce((sum, role) => sum + (day.roles[role] ?? 0), 0))
+  const totals = days.map(day => chartRoles(project).reduce((sum, role) => sum + (day.roles[role] ?? 0), 0))
   const rangeTotal = totals.reduce((sum, value) => sum + value, 0)
   const top = niceTop(Math.max(0, ...totals))
   const gap = range === 90 ? '1px' : range === 30 ? '3px' : '12px'
   const every = range === 7 ? 1 : range === 30 ? 5 : 15
-  const byRole = ROLE_ORDER.map(role => ({ role, value: days.reduce((sum, day) => sum + (day.roles[role] ?? 0), 0) }))
+  const byRole = chartRoles(project).map(role => ({ role, value: days.reduce((sum, day) => sum + (day.roles[role] ?? 0), 0) }))
   const finishedOn = Object.fromEntries(project.heatmap.map(day => [day.day, day.count]))
 
   return h(
@@ -724,7 +894,7 @@ function tokenChart(project) {
     h(
       'div',
       { class: 'section__head', style: { alignItems: 'center' } },
-      h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, h('h2', { id: 'tok-h' }, 'Tokens spent'), h('span', { class: 'section__note' }, `${tokens(rangeTotal)} in the last ${range} days, by agent role`)),
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, h('h2', { id: 'tok-h' }, 'Tokens spent'), h('span', { class: 'section__note' }, `${tokens(rangeTotal)} in the last ${range} days, by agent type`)),
       h(
         'div',
         { class: 'ranges', role: 'group', 'aria-label': 'Time range' },
@@ -759,12 +929,12 @@ function tokenChart(project) {
           h('span', { class: 'gridline', 'aria-hidden': 'true', style: { top: '50%' } }),
           h(
             'div',
-            { class: 'bars', role: 'img', 'aria-label': `${tokens(rangeTotal)} tokens over ${range} days: ${byRole.map(item => `${ROLE[item.role].label} ${tokens(item.value)}`).join(', ')}`, style: { gap } },
+            { class: 'bars', role: 'img', 'aria-label': `${tokens(rangeTotal)} tokens over ${range} days: ${byRole.map(item => `${roleOf(item.role).label} ${tokens(item.value)}`).join(', ')}`, style: { gap } },
             days.map((day, i) =>
               h(
                 'div',
                 { class: 'tbar', title: `${dayLabel(day.day)}: ${tokens(totals[i])} tokens, ${plural(finishedOn[day.day] ?? 0, 'task')} finished`, style: { height: `${((totals[i] / top) * 100).toFixed(2)}%` } },
-                ROLE_ORDER.map(role => h('span', { class: 'tbar__part', 'data-role': role, style: { height: totals[i] ? `${(((day.roles[role] ?? 0) / totals[i]) * 100).toFixed(2)}%` : '0', background: ROLE[role].fill } })),
+                chartRoles(project).map(role => h('span', { class: 'tbar__part', 'data-role': role, style: { height: totals[i] ? `${(((day.roles[role] ?? 0) / totals[i]) * 100).toFixed(2)}%` : '0', background: roleOf(role).fill } })),
               ),
             ),
           ),
@@ -782,12 +952,12 @@ function tokenChart(project) {
       byRole.map(item =>
         h(
           'div',
-          { class: 'total', 'aria-label': `${ROLE[item.role].label}: ${tokens(item.value)} tokens spent`, ...focusable(item.role) },
+          { class: 'total', 'aria-label': `${roleOf(item.role).label}: ${tokens(item.value)} tokens spent`, ...focusable(item.role) },
           chip(item.role, 12),
           h(
             'span',
             { class: 'total__text' },
-            h('span', { class: 'total__label' }, ROLE[item.role].label),
+            h('span', { class: 'total__label' }, roleOf(item.role).label),
             h('span', { class: 'total__value' }, tokens(item.value), ' ', h('span', { class: 'total__pct' }, `${Math.round((item.value / (rangeTotal || 1)) * 100)}%`)),
           ),
         ),
@@ -881,13 +1051,20 @@ function render() {
   else if (!view.project) content = [h('h1', {}, 'Not found'), h('p', { class: 'empty' }, 'That project is not registered with enki on this computer. ', h('a', { href: '#/' }, 'Go to the first project'))]
   else if (r.task && !view.task) content = [h('h1', {}, 'Not found'), h('p', { class: 'empty' }, 'That task is not in this project. ', h('a', { href: projectHref(view.project.id) }, 'Back to the project'))]
   else if (r.settings) content = [settings.mount(view.project.id, view.project.name)]
+  else if (r.library) content = [library.mount(view.project.id, view.project.name)]
+  else if (r.edit) content = [studio.mount(view.project.id, r.edit)]
+  else if (r.agents) content = [agents.mount(view.project.id, r.agents.id, view.project.name)]
   else content = view.task ? renderTask(view.task) : renderProject(view.project)
   // The settings page is the same element each time, so re-renders never touch what's being typed.
+  // The studio is one screen: it fills the pane instead of scrolling in it.
+  main.classList.toggle('mainpane--studio', Boolean(r.edit && view.project))
+  // The canvas gets the whole width: the studio has its own way back.
+  document.querySelector('.shell')?.classList.toggle('shell--studio', Boolean(r.edit && view.project))
   const nodes = content.filter(Boolean)
   if (!(nodes.length === 1 && main.childElementCount === 1 && main.firstElementChild === nodes[0])) main.replaceChildren(...nodes)
   applyFocus()
   fitTasks()
-  document.title = r.settings && view.project ? `Settings · ${view.project.name} · Enki` : view.task ? `${view.task.title} · Enki` : view.project ? `${view.project.name} · Enki` : 'Enki dashboard'
+  document.title = r.settings && view.project ? `Settings · ${view.project.name} · Enki` : (r.library || r.edit) && view.project ? `Workflows · ${view.project.name} · Enki` : r.agents && view.project ? `Agents · Enki` : view.task ? `${view.task.title} · Enki` : view.project ? `${view.project.name} · Enki` : 'Enki dashboard'
 }
 
 function connect() {

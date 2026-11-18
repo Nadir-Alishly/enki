@@ -1,0 +1,22 @@
+{
+  "id": "research",
+  "name": "Research",
+  "description": "Answers a question about the code without changing it: the scout explores, the planner sets out what to find out, and a deeper read-only investigation follows the approved plan.",
+  "version": 2,
+  "nodes": [
+    {"id": "start", "kind": "start"},
+    {"id": "scout", "agent": "scout"},
+    {"id": "planner", "agent": "planner"},
+    {"id": "approval", "kind": "approval"},
+    {"id": "investigate", "agent": "scout"},
+    {"id": "end", "kind": "end"}
+  ],
+  "edges": [
+    {"from": "start", "on": "request", "to": "scout"},
+    {"from": "scout", "on": "done", "to": "planner"},
+    {"from": "planner", "on": "ready", "to": "approval"},
+    {"from": "approval", "on": "approved", "to": "investigate"},
+    {"from": "approval", "on": "changes", "to": "planner"},
+    {"from": "investigate", "on": "done", "to": "end"}
+  ]
+}

@@ -2,7 +2,7 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
-export const ROLES = ['scout', 'coder', 'tester', 'qa', 'reviewer']
+export const ROLES = ['scout', 'planner', 'coder', 'tester', 'qa', 'reviewer']
 export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk']
 export const BROWSER_DRIVERS = ['playwright', 'chrome', 'none']
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
@@ -24,15 +24,9 @@ export const DEFAULTS = {
   permissionMode: 'auto',
   browser: { driver: 'playwright', headless: true },
   repos: [],
-  team: {
-    scout: { model: 'claude-haiku-5-5', effort: 'high' },
-    coder: { model: 'claude-sonnet-5-5', effort: 'high' },
-    tester: { model: 'claude-haiku-5-5', effort: 'high' },
-    qa: { model: 'claude-haiku-5-5', effort: 'high' },
-    reviewer: { model: 'claude-sonnet-5-5', effort: 'high' },
-  },
   timeouts: {
     scout: 900000,
+    planner: 1800000,
     baseline: 600000,
     coder: 1800000,
     tests: 1800000,
@@ -43,6 +37,7 @@ export const DEFAULTS = {
     server: 120000,
   },
   maxFixRounds: 3,
+  workflow: 'full',
   policy: { secrets: [], protected: [], bash: [] },
   memory: 'repo',
   worktrees: true,
@@ -56,7 +51,8 @@ const DEFAULT_TEST_GLOBS = [
   '**/*.test.*', '**/*.spec.*', '**/test_*.py', '**/*_test.py', '**/*_test.go', '**/*_spec.rb', '**/*Test.java', '**/*Tests.cs',
 ]
 
-const TOP_KEYS = new Set(['$schema', 'id', ...Object.keys(DEFAULTS)])
+// `team` is read only to warn that it's no longer used.
+const TOP_KEYS = new Set(['$schema', 'id', 'team', ...Object.keys(DEFAULTS)])
 const REPO_KEYS = new Set(['name', 'path', 'test', 'lint', 'url', 'testGlobs', 'devServer', 'gate', 'worktree'])
 const WORKTREE_KEYS = new Set(['copy', 'link', 'install', 'env'])
 const DATABASE_KEYS = new Set(['copy', 'drop', 'env', 'enabled', 'default'])
@@ -78,7 +74,6 @@ function validateWorktree(value, label, problems) {
 const DEV_SERVER_KEYS = new Set(['managedBy', 'start', 'stop', 'reload', 'restartFor'])
 const GATE_KEYS = new Set(['commands', 'fast', 'suppressions'])
 const POLICY_KEYS = new Set(['secrets', 'protected', 'bash'])
-const TEAM_KEYS = new Set(['model', 'effort', 'skills'])
 const BROWSER_KEYS = new Set(['driver', 'headless', 'executable'])
 export const SKILL_NAME = /^[A-Za-z0-9][\w.-]*(:[A-Za-z0-9][\w.-]*)?$/
 
@@ -198,18 +193,6 @@ export function validateConfig(raw) {
   if (raw.repos !== undefined && !Array.isArray(raw.repos)) problems.push('repos: must be an array')
   const names = new Set()
   if (Array.isArray(raw.repos)) raw.repos.forEach((repo, index) => validateRepo(repo, index, problems, names))
-  for (const [role, settings] of Object.entries(raw.team ?? {})) {
-    if (!ROLES.includes(role)) {
-      problems.push(`team: unknown role "${role}"`)
-      continue
-    }
-    checkUnknown(settings, TEAM_KEYS, `team.${role}`, problems)
-    if (settings.model !== undefined && (typeof settings.model !== 'string' || settings.model.trim() === '')) problems.push(`team.${role}.model: must be a model name`)
-    if (settings.effort !== undefined && !EFFORTS.includes(settings.effort)) problems.push(`team.${role}.effort: must be one of ${EFFORTS.join(', ')}`)
-    if (settings.skills !== undefined && !(isStringArray(settings.skills) && settings.skills.every(name => SKILL_NAME.test(name)))) {
-      problems.push(`team.${role}.skills: must be an array of skill names, like "frontend-design" or "design:ux-copy"`)
-    }
-  }
   for (const [key, value] of Object.entries(raw.timeouts ?? {})) {
     if (!(key in DEFAULTS.timeouts)) problems.push(`timeouts: unknown step "${key}"`)
     else if (!Number.isInteger(value) || value <= 0) problems.push(`timeouts.${key}: must be a positive integer of milliseconds`)
@@ -224,6 +207,7 @@ export function validateConfig(raw) {
       else raw.policy.bash.forEach((rule, index) => validateBashRule(rule, index, problems))
     }
   }
+  if (raw.workflow !== undefined && !(typeof raw.workflow === 'string' && /^[a-z][a-z0-9-]{0,30}$/.test(raw.workflow))) problems.push('workflow: the id of a workflow, like "full"')
   if (raw.memory !== undefined && !['repo', 'private'].includes(raw.memory)) problems.push('memory: must be "repo" or "private"')
   if (raw.memory === 'private' && raw.worktrees === false) problems.push('memory: "private" needs worktrees, because memory follows the task branch enki commits')
   if (raw.worktrees !== undefined && typeof raw.worktrees !== 'boolean') problems.push('worktrees: must be true or false')
@@ -298,14 +282,15 @@ export function loadConfig(root, { repoJson } = {}) {
     if (problems.length > 0) throw new ConfigError(problems)
   }
   validateConfig(raw)
-  const team = {}
-  for (const role of ROLES) team[role] = { skills: [], ...DEFAULTS.team[role], ...raw.team?.[role] }
+  // Agents are set up once, in the library; a project tunes them on its workflow's steps.
+  if (raw.team !== undefined) warnings.push('team is no longer used: set an agent\'s model, effort and skills on the dashboard\'s Agents page, or for this project on its workflow\'s steps in the studio.')
+  if (existsSync(join(root, '.enki', 'roles'))) warnings.push('.enki/roles is no longer read: agents live in your library (~/.enki/library/agents). Move them there, or recreate them on the Agents page.')
+  if (raw.maxFixRounds !== undefined) warnings.push('maxFixRounds is no longer used: each loop in the workflow has its own limit ("max" on its edge).')
   return {
     ...DEFAULTS,
     ...raw,
     browser: { ...DEFAULTS.browser, ...raw.browser },
     repos: (raw.repos ?? []).map(normalizeRepo),
-    team,
     timeouts: { ...DEFAULTS.timeouts, ...raw.timeouts },
     policy: { ...DEFAULTS.policy, ...raw.policy },
     ports: { ...DEFAULTS.ports, ...raw.ports },

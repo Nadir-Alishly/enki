@@ -15,8 +15,8 @@ Per repo, if defined: pass or fail per condition, suppressions used and why, any
 ## Review
 Reviewer findings and how each was resolved, or why not.
 
-## Fix rounds
-How many, and why.
+## Loops and hand-offs
+Each time work went back (which step sent it, and why) and each hand-off to the orchestrator, with how it was resolved. `enki status` and the event log have the counts.
 
 ## Notes updated
 What changed in `.enki/notes/`.

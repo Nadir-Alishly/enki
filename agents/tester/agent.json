@@ -1,0 +1,24 @@
+{
+  "id": "tester",
+  "name": "Tester",
+  "type": "tester",
+  "capabilities": {
+    "write": "tests",
+    "blind": true,
+    "browser": false,
+    "server": false
+  },
+  "outcomes": [
+    {
+      "id": "done",
+      "description": "Tests for the requirements are written: what they cover is in the report"
+    },
+    {
+      "id": "unclear",
+      "description": "The requirements don't say enough to test: the questions are in the report"
+    }
+  ],
+  "model": "claude-haiku-5-5",
+  "effort": "high",
+  "timeout": 1800000
+}

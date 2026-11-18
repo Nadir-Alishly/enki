@@ -4,7 +4,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 
 export class SkillError extends Error {}
 
@@ -59,9 +59,26 @@ function projectDirs(root, workdirs) {
   return dirs
 }
 
+/** A plugin's skill folders: skills/<name>, plus the paths its plugin.json lists, which may be nested. */
+function pluginSkillDirs(plugin) {
+  let listed = []
+  try {
+    const skills = JSON.parse(readFileSync(join(plugin.root, '.claude-plugin', 'plugin.json'), 'utf8')).skills ?? []
+    listed = (Array.isArray(skills) ? skills : [skills]).filter(path => typeof path === 'string').map(path => resolve(plugin.root, path))
+  } catch {
+    // No plugin.json, or an unreadable one: the default folder still counts.
+  }
+  // A listed path is one skill (it has SKILL.md) or a folder of them.
+  const dirs = [join(plugin.root, 'skills'), ...listed].flatMap(dir =>
+    existsSync(join(dir, 'SKILL.md')) ? [dir] : existsSync(dir) && statSync(dir).isDirectory() ? readdirSync(dir).map(name => join(dir, name)) : [],
+  )
+  return [...new Set(dirs)].filter(dir => existsSync(join(dir, 'SKILL.md')))
+}
+
 function findPluginSkill(pluginName, skillName) {
   for (const plugin of installedPlugins().filter(item => item.name === pluginName)) {
-    const nested = skillAt(join(plugin.root, 'skills', skillName), { pluginRoot: plugin.root })
+    const dir = pluginSkillDirs(plugin).find(item => basename(item) === skillName)
+    const nested = dir && skillAt(dir, { pluginRoot: plugin.root })
     if (nested) return nested
     // A plugin may be one skill, with SKILL.md at its root.
     if (skillName === pluginName) {
@@ -123,7 +140,7 @@ export function availableSkills({ root, workdirs }) {
   const found = [...namedSkills(personalDir())]
   for (const dir of projectDirs(root, workdirs)) found.push(...namedSkills(dir))
   for (const plugin of installedPlugins()) {
-    found.push(...namedSkills(join(plugin.root, 'skills'), `${plugin.name}:`))
+    for (const dir of pluginSkillDirs(plugin)) found.push({ name: `${plugin.name}:${basename(dir)}`, description: parseSkill(readFileSync(join(dir, 'SKILL.md'), 'utf8')).description })
     if (existsSync(join(plugin.root, 'SKILL.md'))) {
       found.push({ name: `${plugin.name}:${plugin.name}`, description: parseSkill(readFileSync(join(plugin.root, 'SKILL.md'), 'utf8')).description })
     }

@@ -3,10 +3,11 @@
 // save when the file changed since the page read it.
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 import { configPath, DATABASE_MODES, DEFAULTS, EFFORTS, ROLES, SKILL_NAME, validateConfig } from '../src/config.mjs'
+import { listWorkflows } from '../src/library.mjs'
 import { loadProjectConfig } from '../src/memory.mjs'
+import { builtinRoles, loadRoles } from '../src/agents.mjs'
 import { availableSkills } from '../src/skills.mjs'
 import { writeJsonAtomic } from '../src/state.mjs'
 import { git } from '../src/worktrees.mjs'
@@ -21,26 +22,7 @@ export class SettingsError extends Error {
 }
 
 const MINUTE = 60000
-const rolesDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'roles')
-const ROLE_NAMES = { scout: 'scout', coder: 'coder', tester: 'tester', qa: 'QA', reviewer: 'reviewer' }
-const BROWSER_NAMES = { playwright: 'Playwright', chrome: 'Claude in Chrome', none: 'no browser' }
 
-/** A role file's opening paragraph, after its heading. */
-function summary(path) {
-  try {
-    return readFileSync(path, 'utf8').split(/\n\s*\n/).map(part => part.trim()).find(part => part && !part.startsWith('#')) ?? ''
-  } catch {
-    return ''
-  }
-}
-
-/** What enki itself gives every agent: its role instructions, and QA's browser guide for each driver. */
-export function builtIns() {
-  return {
-    roles: Object.fromEntries(ROLES.map(role => [role, { label: `Enki ${ROLE_NAMES[role]} role`, description: summary(join(rolesDir, `${role}.md`)) }])),
-    browser: Object.fromEntries(Object.entries(BROWSER_NAMES).map(([driver, name]) => [driver, { label: `Enki browser guide: ${name}`, description: summary(join(rolesDir, 'browser', `${driver}.md`)) }])),
-  }
-}
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 const PLACEHOLDER = /\{(task|port(:[\w./-]+)?)\}/
 
@@ -67,14 +49,13 @@ export function configHashes(projects) {
 const minutes = ms => Math.round((ms / MINUTE) * 100) / 100
 
 /** The editable values as the page shows them, from the raw file with defaults filled in. */
-export function editableValues(raw) {
+/** Enki's own roles first, in their usual order, then the library's and the project's. */
+const roleOrder = roles => [...ROLES.filter(id => roles.has(id)), ...[...roles.keys()].filter(id => !ROLES.includes(id))]
+
+export function editableValues(raw, roles = builtinRoles()) {
   const database = raw.database ?? null
   return {
-    team: Object.fromEntries(ROLES.map(role => {
-      const own = { ...DEFAULTS.team[role], ...raw.team?.[role] }
-      return [role, { model: own.model, effort: own.effort, skills: own.skills ?? [] }]
-    })),
-    maxFixRounds: raw.maxFixRounds ?? DEFAULTS.maxFixRounds,
+    workflow: raw.workflow ?? DEFAULTS.workflow,
     mode: raw.mode ?? DEFAULTS.mode,
     worktrees: raw.worktrees ?? DEFAULTS.worktrees,
     timeouts: Object.fromEntries(Object.keys(DEFAULTS.timeouts).map(key => [key, minutes(raw.timeouts?.[key] ?? DEFAULTS.timeouts[key])])),
@@ -120,13 +101,24 @@ export function readSettings(project) {
   } catch (error) {
     problem = error.problems ?? [error.message]
   }
+  const roles = loadRoles(project.root)
+  const { workflows } = listWorkflows(project.root)
   return {
     hash,
-    values: editableValues(raw),
+    values: editableValues(raw, roles),
     readOnly: readOnly(project, raw),
     invalid: problem,
-    options: { models: modelCatalog(), efforts: EFFORTS, drivers: ['playwright', 'chrome', 'none'], databaseModes: DATABASE_MODES },
-    builtIn: builtIns(),
+    options: {
+      models: modelCatalog(),
+      efforts: EFFORTS,
+      drivers: ['playwright', 'chrome', 'none'],
+      databaseModes: DATABASE_MODES,
+      roles: roleOrder(roles).map(id => {
+        const role = roles.get(id)
+        return { id, name: role.name, color: role.color ?? null, pattern: role.pattern ?? null, source: role.source, skills: role.skills ?? [] }
+      }),
+      workflows: workflows.map(workflow => ({ id: workflow.id, name: workflow.name, description: workflow.description, source: workflow.source, runnable: workflow.problems.length === 0 })),
+    },
   }
 }
 
@@ -165,23 +157,16 @@ function put(raw, path, value) {
  * Applies the page's changes to the raw config. Only these paths can be set, and each is
  * checked for its type here; validateConfig checks the result as a whole.
  */
-export function applyChanges(raw, changes) {
+export function applyChanges(raw, changes, { roles = new Set(ROLES), workflows = null } = {}) {
   if (!isObject(changes)) throw new SettingsError(400, 'Changes must be an object')
   const problems = []
   const next = structuredClone(raw)
   const bad = (path, message) => problems.push({ path, message })
   for (const [path, value] of Object.entries(changes)) {
-    const role = /^team\.([a-z]+)\.(model|effort|skills)$/.exec(path)
     const timeout = /^timeouts\.(\w+)$/.exec(path)
-    if (role && ROLES.includes(role[1])) {
-      const [, , field] = role
-      if (field === 'model' && !(typeof value === 'string' && value.trim())) bad(path, 'Choose a model.')
-      else if (field === 'effort' && !EFFORTS.includes(value)) bad(path, `Choose one of ${EFFORTS.join(', ')}.`)
-      else if (field === 'skills') {
-        if (!Array.isArray(value) || !value.every(name => typeof name === 'string' && SKILL_NAME.test(name))) bad(path, 'Use skill names like frontend-design or design:ux-copy.')
-        else if (new Set(value).size !== value.length) bad(path, 'Each skill can be added once.')
-        else put(next, path, value)
-      } else put(next, path, field === 'model' ? value.trim() : value)
+    if (path === 'workflow') {
+      if (typeof value !== 'string' || (workflows && !workflows.has(value))) bad(path, 'Choose a workflow that can run.')
+      else next.workflow = value
     } else if (timeout && timeout[1] in DEFAULTS.timeouts) {
       if (!isNumber(value) || value <= 0) bad(path, 'Enter minutes, more than 0.')
       else put(next, path, Math.round(value * MINUTE))
@@ -265,7 +250,9 @@ export function applyChanges(raw, changes) {
 export function saveSettings(project, { base, changes } = {}) {
   const { hash, raw } = readRaw(project.root)
   if (base !== hash) throw new SettingsError(409, 'The settings file changed since this page read it')
-  const next = applyChanges(raw, changes)
+  const roles = new Set(loadRoles(project.root).keys())
+  const workflows = new Set(listWorkflows(project.root).workflows.filter(workflow => workflow.problems.length === 0).map(workflow => workflow.id))
+  const next = applyChanges(raw, changes, { roles, workflows })
   writeJsonAtomic(configPath(project.root), next)
   return readSettings(project)
 }

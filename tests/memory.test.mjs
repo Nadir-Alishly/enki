@@ -56,15 +56,11 @@ function start(p, slug, pane = 'w1:a') {
 /** Approve, test, review: everything the finish gate needs. */
 function finish(p, slug, pane, { abandon = false } = {}) {
   if (!abandon) {
-    p.write(join(p.taskDir(slug), 'scout.md'), 'x')
-    p.enki(['phase', 'planning'], pane)
-    p.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: '# Plan\n' } }, { ...IDENTITY, ...pane })
+    const plan = p.planReady('# Plan\n', pane)
+    p.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan } }, { ...IDENTITY, ...pane })
     assert.equal(p.enki(['team', 'start'], pane).code, 0)
     p.write(join(p.taskDir(slug), 'requirements.md'), `# Requirements\n\n## Goal\n\n${slug} work.\n`)
-    p.write(join(p.taskDir(slug), 'tests.md'), 'x')
-    assert.equal(p.enki(['verify'], pane).code, 0)
-    p.write(join(p.taskDir(slug), 'qa-r1.md'), 'x')
-    p.write(join(p.taskDir(slug), 'reviewer-r1.md'), 'x')
+    p.runWorkflow(slug, pane)
   }
   const result = p.enki(['phase', 'done', ...(abandon ? ['--abandon'] : [])], pane)
   assert.equal(result.code, 0, result.err)

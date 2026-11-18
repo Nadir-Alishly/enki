@@ -2,7 +2,8 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pluginRoot } from './paths.mjs'
-import { renderSkills } from './skills.mjs'
+import { teamOf } from './agents.mjs'
+import { parseSkill, renderSkills } from './skills.mjs'
 import { playbookTexts, taskNotesPath } from './memory.mjs'
 
 const fill = (template, values) =>
@@ -71,10 +72,12 @@ export function writeRules(state, config) {
 
 /** A worker's role prompt: the plugin's role, its browser notes and the project's playbook. */
 export function writeRoleFile(state, config, role, skills = []) {
-  const parts = [readFileSync(join(pluginRoot, 'roles', `${role}.md`), 'utf8').trim()]
-  if (role === 'qa') {
+  const entry = teamOf(state)[role]
+  if (!entry) throw new Error(`This task has no step "${role}".`)
+  const parts = [parseSkill(readFileSync(entry.skillPath, 'utf8')).body.trim()]
+  if (entry.capabilities.browser) {
     const driver = config.browser.driver === 'playwright' && !state.repos.some(repo => repo.url) ? 'none' : config.browser.driver
-    parts.push(readFileSync(join(pluginRoot, 'roles', 'browser', `${driver}.md`), 'utf8').trim())
+    parts.push(fill(readFileSync(join(pluginRoot, 'templates', 'browser', `${driver}.md`), 'utf8').trim(), { step: role }))
   }
   const playbook = playbookSection(state, role)
   if (playbook !== '') parts.push(`## Project rules for the ${role}\n\n${playbook}`)

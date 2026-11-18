@@ -20,7 +20,7 @@ Run `enki phase reporting`. Fill in `${CLAUDE_PLUGIN_ROOT}/templates/report.md` 
 
 ## 3. Rate the orchestration
 
-Rate how you ran the task, not how good the code is. Back every score with concrete evidence, and don't inflate. A task that went smoothly but needed 3 fix rounds because of a vague brief is not a 9.
+Rate how you ran the task, not how good the code is. Back every score with concrete evidence, and don't inflate. A task that went smoothly but looped back to the coder 3 times because of a vague brief is not a 9.
 
 | Area | What it measures |
 |---|---|

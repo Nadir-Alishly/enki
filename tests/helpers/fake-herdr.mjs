@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Stands in for herdr. Response shapes were captured from herdr 0.9.5 (see docs/spike-results.md).
 // Behaviour is scripted through the JSON file named by FAKE_HERDR_STATE.
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { closeSync, existsSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 
 const path = process.env.FAKE_HERDR_STATE
@@ -27,6 +27,28 @@ const args = process.argv.slice(2)
 state.calls.push(args)
 
 const save = () => writeFileSync(path, JSON.stringify(state, null, 2))
+
+/**
+ * A finishing worker reports its outcome as a real one would, with `enki report` in its own env:
+ * what the test scripted for it (script.report[name], a queue; "none" to skip), else its role's first.
+ */
+function reportAs(target) {
+  const env = state.panes[state.agents[target]?.pane]?.env ?? {}
+  const step = env.ENKI_STEP ?? env.ENKI_ROLE
+  if (!step || !env.ENKI_TASK) return
+  let outcome = shift('report', target, null)
+  if (outcome === 'none') return
+  if (!outcome) {
+    try {
+      outcome = JSON.parse(readFileSync(`${env.ENKI_TASK}/state.json`, 'utf8')).team?.[step]?.outcomes?.[0]?.id ?? null
+    } catch {
+      outcome = null
+    }
+  }
+  if (!outcome) return
+  const enki = new URL('../../bin/enki', import.meta.url).pathname
+  spawnSync(process.execPath, [enki, 'report', outcome], { env: { ...process.env, ...env }, encoding: 'utf8' })
+}
 const ok = (result, id = 'cli') => { save(); process.stdout.write(`${JSON.stringify({ id, result })}\n`); process.exit(0) }
 const fail = (code, message) => { save(); process.stderr.write(`${JSON.stringify({ error: { code, message }, id: 'cli' })}\n`); process.exit(1) }
 const option = name => { const i = args.indexOf(name); return i === -1 ? undefined : args[i + 1] }
@@ -95,7 +117,7 @@ if (group === 'agent') {
     state.agents[target] = { pane, status: 'idle' }
     if (!state.script.noHooks) {
       const { recordEvent } = await import(new URL('../../src/state.mjs', import.meta.url))
-      recordEvent(state.panes[pane].env.ENKI_TASK, 'worker.hooks_ready', { role: state.panes[pane].env.ENKI_ROLE })
+      recordEvent(state.panes[pane].env.ENKI_TASK, 'worker.hooks_ready', { role: state.panes[pane].env.ENKI_STEP ?? state.panes[pane].env.ENKI_ROLE })
     }
     ok(shape(target, 'idle'))
   }
@@ -123,6 +145,7 @@ if (group === 'agent') {
   if (command === 'wait') {
     const outcome = shift('wait', target, 'done')
     if (outcome === 'timeout') fail('timeout', 'timed out')
+    if ((outcome === 'done' || outcome === 'idle') && state.agents[target].status === 'working') reportAs(target)
     state.agents[target].status = outcome
     ok(shape(target, outcome))
   }

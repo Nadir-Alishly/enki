@@ -1,0 +1,24 @@
+{
+  "id": "coder",
+  "name": "Coder",
+  "type": "coder",
+  "capabilities": {
+    "write": "code",
+    "blind": false,
+    "browser": false,
+    "server": false
+  },
+  "outcomes": [
+    {
+      "id": "done",
+      "description": "The brief is implemented: what changed is in the report"
+    },
+    {
+      "id": "blocked",
+      "description": "Can't go on: the plan is wrong or something is missing, explained in the report"
+    }
+  ],
+  "model": "claude-sonnet-5-5",
+  "effort": "high",
+  "timeout": 1800000
+}

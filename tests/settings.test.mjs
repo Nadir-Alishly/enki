@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
-import { applyChanges, builtIns, editableValues, readSettings, saveSettings, SettingsError } from '../dashboard/settings.mjs'
+import { applyChanges, editableValues, readSettings, saveSettings, SettingsError } from '../dashboard/settings.mjs'
 import { modelCatalog } from '../dashboard/models.mjs'
 import { makeProject } from './helpers/harness.mjs'
 
@@ -19,11 +19,10 @@ const fails = (raw, changes) => {
 }
 
 test('values come from the file, with defaults and timeouts in minutes', () => {
-  const values = editableValues({ timeouts: { coder: 90000 }, team: { coder: { model: 'claude-opus-4-5', skills: ['design:ux-copy'] } } })
+  const values = editableValues({ timeouts: { coder: 90000 }, team: { coder: { model: 'claude-opus-4-5' } } })
   assert.equal(values.timeouts.coder, 1.5, 'a value that isn’t whole minutes keeps its decimals')
   assert.equal(values.timeouts.scout, 15)
-  assert.deepEqual(values.team.coder, { model: 'claude-opus-4-5', effort: 'high', skills: ['design:ux-copy'] })
-  assert.deepEqual(values.team.scout.skills, [])
+  assert.equal(values.team, undefined, 'agents are set up on the Agents page and in workflows, not here')
   assert.equal(values.mode, 'auto')
   assert.deepEqual(values.ports, { from: 4400, to: 4999 })
   assert.deepEqual(values.database, { enabled: false, default: 'copy', copy: '', drop: '', env: [] }, 'no section shows copying off')
@@ -33,13 +32,12 @@ test('values come from the file, with defaults and timeouts in minutes', () => {
 
 test('a change touches only its own field, and keeps key order and unknown keys', () => {
   const raw = { id: 'p', policy: { secrets: ['x'] }, team: { coder: { model: 'claude-sonnet-5-5', effort: 'high' } }, timeouts: { coder: 90000 }, repos: [] }
-  const next = applyChanges(raw, { 'team.coder.effort': 'max', 'team.scout.skills': ['a', 'design:ux-copy'], 'timeouts.scout': 2, maxFixRounds: 5 })
-  assert.deepEqual(Object.keys(next), ['id', 'policy', 'team', 'timeouts', 'repos', 'maxFixRounds'])
-  assert.deepEqual(next.team.coder, { model: 'claude-sonnet-5-5', effort: 'max' })
-  assert.deepEqual(next.team.scout, { skills: ['a', 'design:ux-copy'] })
+  const next = applyChanges(raw, { 'timeouts.scout': 2, maxFixRounds: 5, workflow: 'quick-fix' })
+  assert.deepEqual(Object.keys(next), ['id', 'policy', 'team', 'timeouts', 'repos', 'maxFixRounds', 'workflow'])
+  assert.deepEqual(next.team, raw.team, 'an old setting the page doesn’t show stays as it was')
   assert.deepEqual(next.timeouts, { coder: 90000, scout: 120000 }, 'an untouched timeout keeps its exact value')
   assert.deepEqual(next.policy, { secrets: ['x'] })
-  assert.equal(raw.team.coder.effort, 'high', 'the input is not changed')
+  assert.equal(raw.timeouts.scout, undefined, 'the input is not changed')
 })
 
 test('a port range gets both ends, and from may equal to', () => {
@@ -71,42 +69,30 @@ test('env names are checked one by one', () => {
 })
 
 test('values are checked, and only the page’s fields can change', () => {
-  assert.equal(fails({}, { 'team.coder.effort': 'huge' })[0].path, 'team.coder.effort')
-  assert.equal(fails({}, { 'team.coder.skills': ['ok', 'ok'] })[0].message, 'Each skill can be added once.')
-  assert.equal(fails({}, { 'team.coder.skills': ['bad name'] })[0].path, 'team.coder.skills')
   assert.equal(fails({}, { 'timeouts.coder': 0 })[0].path, 'timeouts.coder')
   assert.equal(fails({}, { maxFixRounds: 1.5 })[0].path, 'maxFixRounds')
   assert.equal(fails({ memory: 'private' }, { worktrees: false })[0].path, 'memory', 'validateConfig’s problems carry their path')
-  for (const path of ['permissionMode', 'policy.secrets', 'repos', 'memory', 'database.other', 'team.boss.model', 'timeouts.lunch']) {
+  for (const path of ['permissionMode', 'policy.secrets', 'repos', 'memory', 'database.other', 'team.coder.model', 'timeouts.lunch']) {
     assert.equal(fails({}, { [path]: 'x' })[0].message, 'This setting can’t be changed here.', path)
   }
   assert.throws(() => applyChanges({}, null), SettingsError)
 })
 
 test('saving refuses a file that changed since it was read, and writes otherwise', () => {
-  const project = makeProject({ team: { coder: { model: 'claude-sonnet-5-5' } } })
+  const project = makeProject()
   const target = { id: 'proj1', root: project.root }
   const first = readSettings(target)
   assert.equal(first.readOnly.repos[0].name, 'web')
   assert.deepEqual(first.readOnly.repos[0].test, ['npm test'])
   assert.equal(first.readOnly.repos[0].devServer, 'Started by you')
   assert.equal(first.invalid, null)
-  const saved = saveSettings(target, { base: first.hash, changes: { 'team.coder.model': 'claude-opus-5-5' } })
+  const saved = saveSettings(target, { base: first.hash, changes: { 'timeouts.coder': 45 } })
   assert.notEqual(saved.hash, first.hash)
   const path = join(project.root, '.enki/config.json')
-  assert.equal(JSON.parse(readFileSync(path, 'utf8')).team.coder.model, 'claude-opus-5-5')
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).timeouts.coder, 2700000)
   assert.throws(() => saveSettings(target, { base: first.hash, changes: { maxFixRounds: 1 } }), error => error.status === 409)
   writeFileSync(path, '{"id": "proj1", "maxFixRounds": "lots"}')
   assert.ok(readSettings(target).invalid.some(problem => problem.startsWith('maxFixRounds')), 'an invalid file is reported, not thrown')
-})
-
-test('each role shows enki’s own instructions, and QA its browser guide for each driver', () => {
-  const built = builtIns()
-  assert.deepEqual(Object.keys(built.roles), ['scout', 'coder', 'tester', 'qa', 'reviewer'])
-  assert.equal(built.roles.coder.label, 'Enki coder role')
-  assert.match(built.roles.coder.description, /^You are the coder/)
-  assert.deepEqual(Object.keys(built.browser), ['playwright', 'chrome', 'none'])
-  assert.match(built.browser.playwright.description, /Playwright/)
 })
 
 test('models come from Claude Code’s newest catalog for the CLI, else enki’s own list', t => {
