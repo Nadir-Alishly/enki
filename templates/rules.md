@@ -16,7 +16,7 @@ These apply to every agent. Hooks enforce many of them. If a task seems to need 
 
 - **Git:** no commits, branches, pushes, merges, rebases, tags or stashes. No `reset --hard`, `checkout -- .`, `restore .` or `clean`. Never discard uncommitted work, yours or anyone else's. The tree may hold the user's changes: leave them alone.
 - **Files:** stay inside `{{projectRoot}}`. Temp files go in the task folder or your session scratchpad, never `/tmp`. Delete only files you created in this task, and only by literal absolute path, never through variables, substitutions or globs. Leave dependency directories and build output alone.
-- **Secrets:** never read, print, edit or copy `.env*`, private keys, certificates, credentials, cookies or data exports containing user data. Never put secrets in reports, notes, fixtures or prompts.
+- **Secrets:** never read, print, edit or copy `.env*`, private keys, certificates, credentials, cookies or data exports containing user data. Never put secrets in reports, notes, fixtures or prompts. When your brief names a test account or other secret, read it with `enki secret get <name>` at the moment you use it, and refer to it by name everywhere else.
 - **Infra and dependencies:** CI, Docker, process manager and web server configs, dependency manifests and lockfiles are off-limits unless the approved scope lists them. No package installs.
 - **Processes:** never start, stop, restart or kill servers directly. QA runs them through `enki server`. Anyone else: report it. No `sudo`, no system changes, no `curl | sh`.
 - **Data:** local databases only. No dropping, bulk deletes, flushes or migrations unless the user approves. Tests clean up only what they created.

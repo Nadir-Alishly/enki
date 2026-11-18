@@ -2,10 +2,8 @@
 // or the browser page is reloaded. The form is built once per load and then updated in place, so
 // live updates and re-renders never wipe what you're typing.
 
-const ROLES = ['scout', 'coder', 'tester', 'qa', 'reviewer']
-const EFFORT_LABELS = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max' }
 const DRIVER_LABELS = { playwright: 'Playwright', chrome: 'Claude in Chrome', none: 'None' }
-const TIMEOUTS = [['scout', 'Scout'], ['baseline', 'Baseline'], ['coder', 'Coder'], ['tests', 'Tests'], ['tester', 'Tester'], ['qa', 'QA'], ['verify', 'Verify'], ['reviewer', 'Reviewer'], ['server', 'Server start']]
+const TIMEOUTS = [['scout', 'Scout'], ['planner', 'Planner'], ['baseline', 'Baseline'], ['coder', 'Coder'], ['tests', 'Tests'], ['tester', 'Tester'], ['qa', 'QA'], ['verify', 'Verify'], ['reviewer', 'Reviewer'], ['server', 'Server start']]
 const DATABASE_HELP = { copy: 'New plans get their own copy of the database.', shared: 'New plans use the shared database.', none: 'New plans run without a database.' }
 // The same rules as the server's, so most mistakes show before saving.
 const SKILL_NAME = /^[A-Za-z0-9][\w.-]*(:[A-Za-z0-9][\w.-]*)?$/
@@ -20,8 +18,7 @@ const clock = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute:
 /** The form's copy of the values: numbers stay the text typed into their inputs. */
 function toDraft(values) {
   return {
-    team: clone(values.team),
-    maxFixRounds: String(values.maxFixRounds),
+    workflow: values.workflow,
     mode: values.mode,
     worktrees: values.worktrees,
     timeouts: Object.fromEntries(Object.entries(values.timeouts).map(([key, value]) => [key, String(value)])),
@@ -48,10 +45,7 @@ function changesOf(draft, saved) {
   const diff = (path, now, before, value = now) => {
     if (JSON.stringify(now) !== JSON.stringify(before)) changes[path] = value
   }
-  for (const role of ROLES) {
-    for (const key of ['model', 'effort', 'skills']) diff(`team.${role}.${key}`, draft.team[role][key], saved.team[role][key])
-  }
-  diff('maxFixRounds', asNumber(draft.maxFixRounds, WHOLE), Number(saved.maxFixRounds))
+  diff('workflow', draft.workflow, saved.workflow)
   diff('mode', draft.mode, saved.mode)
   diff('worktrees', draft.worktrees, saved.worktrees)
   for (const [key] of TIMEOUTS) diff(`timeouts.${key}`, asNumber(draft.timeouts[key], DECIMAL), Number(saved.timeouts[key]))
@@ -68,21 +62,9 @@ function changesOf(draft, saved) {
 }
 
 /** Problems keyed by field. Database rules apply only when this save touches them, as on the server. */
-/** The effort levels a model offers: null when the catalog doesn't say, so any level goes. */
-const effortsOf = (catalog, id) => catalog.models.find(model => model.id === id)?.efforts ?? null
 
 function problemsOf(draft, changes, catalog) {
   const errs = {}
-  for (const role of ROLES) {
-    const { model, effort } = draft.team[role]
-    const levels = effortsOf(catalog, model)
-    const touched = `team.${role}.model` in changes || `team.${role}.effort` in changes
-    if (touched && levels?.length && !levels.includes(effort)) {
-      const label = catalog.models.find(item => item.id === model)?.label ?? model
-      errs[`team.${role}.effort`] = `${label} doesn’t offer ${EFFORT_LABELS[effort] ?? effort} effort. Choose another level.`
-    }
-  }
-  if (!WHOLE.test(draft.maxFixRounds)) errs.maxFixRounds = 'Enter a whole number, 0 or more.'
   for (const [key] of TIMEOUTS) {
     const text = draft.timeouts[key]
     if (!DECIMAL.test(text) || Number(text) <= 0) errs[`timeouts.${key}`] = 'Enter minutes, more than 0.'
@@ -115,10 +97,9 @@ function problemsOf(draft, changes, catalog) {
 // The server names a few problems by a broader path than the field that shows them.
 const fieldOf = path => ({ ports: 'ports.to', memory: 'worktrees' })[path] ?? path
 
-export function createSettings({ h, svg, chip, getJson, onDirty }) {
+export function createSettings({ h, svg, chip, getJson, onDirty, learnRoles = () => {}, libraryHref = () => '#/' }) {
   const stores = new Map()
   let editToken = null
-  let skillsCache = new Map()
 
   const icon = {
     info: () => svg(18, [['circle', { cx: 8, cy: 8, r: 6.5 }], ['path', { d: 'M8 7.2v4.3M8 4.8v.1' }]], { stroke: 'var(--lavender)', width: 1.4 }),
@@ -151,6 +132,8 @@ export function createSettings({ h, svg, chip, getJson, onDirty }) {
     try {
       const data = await getJson(`/api/projects/${encodeURIComponent(s.id)}/settings`)
       s.data = data
+      // So every role's chip has its color, the project's own roles included.
+      learnRoles(Object.fromEntries((data.options.roles ?? []).map(role => [role.id, { label: role.name, role: role.id, color: role.color, pattern: role.pattern }])))
       s.saved = toDraft(data.values)
       s.draft = toDraft(data.values)
       s.ui = { reloaded }
@@ -163,16 +146,6 @@ export function createSettings({ h, svg, chip, getJson, onDirty }) {
       )
     }
     onDirty()
-  }
-
-  async function loadSkills(s) {
-    if (skillsCache.has(s.id)) return
-    skillsCache.set(s.id, [])
-    try {
-      skillsCache.set(s.id, (await getJson(`/api/projects/${encodeURIComponent(s.id)}/skills`)).skills)
-    } catch {
-      skillsCache.delete(s.id)
-    }
   }
 
   /** Re-checks everything after any edit, and updates each bound part of the page in place. */
@@ -279,194 +252,11 @@ export function createSettings({ h, svg, chip, getJson, onDirty }) {
 
   // ---------- skills, with autocomplete ----------
 
-  function skillPicker(s, role) {
-    const id = `skill-${role}`
-    const list = h('div', { class: 'chips' })
-    const listbox = h('ul', { class: 'combo__list', role: 'listbox', id: `${id}-list`, hidden: true, 'aria-label': `Skills to add to ${ROLE_NAME[role]}` })
-    const box = h('input', {
-      id,
-      type: 'text',
-      class: 'input input--mono',
-      role: 'combobox',
-      'aria-autocomplete': 'list',
-      'aria-expanded': 'false',
-      'aria-controls': `${id}-list`,
-      autocomplete: 'off',
-      spellcheck: 'false',
-      placeholder: 'e.g. design:ux-copy',
-    })
-    const addButton = h('button', { type: 'button', class: 'btn btn--secondary' }, 'Add')
-    const errNode = h('span', { class: 'field__error', id: `${id}-err`, hidden: true })
-    const warnNode = h('span', { class: 'field__warn', id: `${id}-warn`, hidden: true })
-    box.setAttribute('aria-describedby', `${id}-err ${id}-warn`)
-    let options = []
-    let active = -1
-    let error = ''
-
-    const skills = () => s.draft.team[role].skills
-    s.fieldKeys.add(`team.${role}.skills`)
-    const known = () => skillsCache.get(s.id) ?? []
-
-    function close() {
-      listbox.hidden = true
-      box.setAttribute('aria-expanded', 'false')
-      box.removeAttribute('aria-activedescendant')
-      active = -1
-    }
-
-    function showOptions() {
-      const query = box.value.trim().toLowerCase()
-      options = known()
-        .filter(skill => !skills().includes(skill.name))
-        .filter(skill => !query || skill.name.toLowerCase().includes(query) || skill.description.toLowerCase().includes(query))
-        .sort((a, b) => Number(!a.name.toLowerCase().startsWith(query)) - Number(!b.name.toLowerCase().startsWith(query)))
-        .slice(0, 8)
-      active = Math.min(active, options.length - 1)
-      listbox.replaceChildren(
-        ...options.map((skill, index) =>
-          h(
-            'li',
-            {
-              id: `${id}-opt-${index}`,
-              role: 'option',
-              class: 'combo__option',
-              'aria-selected': String(index === active),
-              onMousedown: event => event.preventDefault(),
-              onClick: () => add(skill.name),
-            },
-            h('span', { class: 'combo__name' }, skill.name),
-            skill.description && h('span', { class: 'combo__desc' }, skill.description),
-          ),
-        ),
-      )
-      const open = options.length > 0 && document.activeElement === box
-      listbox.hidden = !open
-      box.setAttribute('aria-expanded', String(open))
-      if (open && active >= 0) {
-        box.setAttribute('aria-activedescendant', `${id}-opt-${active}`)
-        listbox.children[active]?.scrollIntoView({ block: 'nearest' })
-      } else box.removeAttribute('aria-activedescendant')
-    }
-
-    function add(name) {
-      const value = (name ?? box.value).trim()
-      if (!value) error = 'Type a skill name first.'
-      else if (!SKILL_NAME.test(value)) error = 'Use a skill name like design:ux-copy: letters, digits, dots, dashes and underscores, with one optional colon.'
-      else if (skills().includes(value)) error = `${value} is already added.`
-      else {
-        error = ''
-        s.draft.team[role].skills = [...skills(), value]
-        box.value = ''
-        close()
-        update(s)
-        box.focus()
-        return
-      }
-      update(s, { edited: false })
-    }
-
-    box.addEventListener('input', () => {
-      error = ''
-      active = -1
-      showOptions()
-      update(s, { edited: false })
-    })
-    box.addEventListener('focus', () => loadSkills(s).then(showOptions))
-    box.addEventListener('blur', () => setTimeout(close, 100))
-    box.addEventListener('keydown', event => {
-      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-        event.preventDefault()
-        if (listbox.hidden) showOptions()
-        if (options.length === 0) return
-        active = event.key === 'ArrowDown' ? (active + 1) % options.length : (active <= 0 ? options.length : active) - 1
-        showOptions()
-      } else if (event.key === 'Enter') {
-        event.preventDefault()
-        add(!listbox.hidden && active >= 0 ? options[active].name : undefined)
-      } else if (event.key === 'Escape' && !listbox.hidden) {
-        event.preventDefault()
-        event.stopPropagation()
-        close()
-      }
-    })
-    addButton.addEventListener('click', () => add())
-
-    let shown = ''
-    s.binds.push(() => {
-      const names = skills()
-      const builtIn = [s.data.builtIn?.roles?.[role], role === 'qa' && s.data.builtIn?.browser?.[s.draft.driver]].filter(Boolean)
-      const key = [...builtIn.map(item => item.label), ...names].join('\n')
-      if (key !== shown || list.childElementCount === 0) {
-        shown = key
-        list.replaceChildren(
-          ...builtIn.map(item =>
-            h(
-              'span',
-              { class: 'skillchip skillchip--locked', title: `${item.description} Built into enki, so it’s always loaded and can’t be removed.` },
-              icon.lock(),
-              item.label,
-              h('span', { class: 'sr-only' }, `: built into enki, can’t be removed. ${item.description}`),
-            ),
-          ),
-          ...(names.length
-            ? names.map(name =>
-                h(
-                  'span',
-                  { class: 'skillchip' },
-                  name,
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      class: 'skillchip__remove',
-                      'aria-label': `Remove ${name} from ${ROLE_NAME[role]}`,
-                      onClick: () => {
-                        s.draft.team[role].skills = skills().filter(item => item !== name)
-                        update(s)
-                        box.focus()
-                      },
-                    },
-                    icon.close(12),
-                  ),
-                ),
-              )
-            : [h('span', { class: 'chips__empty' }, builtIn.length ? 'No skills of your own' : 'No skills added')]),
-        )
-      }
-    })
-    s.binds.push(ctx => {
-      const message = error || ctx.errs[`team.${role}.skills`]
-      errNode.textContent = message ? `Error: ${message}` : ''
-      errNode.hidden = !message
-      box.setAttribute('aria-invalid', String(Boolean(message)))
-    })
-    s.binds.push(() => {
-      const names = skills()
-      const missing = known().length ? names.filter(name => !known().some(skill => skill.name === name)) : []
-      warnNode.textContent = missing.length ? `Not installed on this machine: ${missing.join(', ')}. Team start will stop until ${missing.length === 1 ? 'it is' : 'they are'}.` : ''
-      warnNode.hidden = !missing.length
-    })
-
-    return h(
-      'div',
-      { class: 'field field--skills' },
-      h('label', { class: 'field__label', for: id }, 'Skills'),
-      list,
-      h('div', { class: 'combo' }, h('div', { class: 'combo__field' }, box, listbox), addButton),
-      errNode,
-      warnNode,
-    )
-  }
-
-  // ---------- the page ----------
-
   function build(s) {
     s.binds = []
     s.fieldKeys = new Set(['ports.from', 'ports.to', 'worktrees'])
     const { data } = s
     const d = () => s.draft
-    const catalog = data.options.models
-    const modelIds = new Set(catalog.models.map(model => model.id))
     const ro = data.readOnly
     const isPrivate = ro.memory === 'private'
 
@@ -504,59 +294,36 @@ export function createSettings({ h, svg, chip, getJson, onDirty }) {
 
     const panel = (id, title, note, ...body) => h('section', { class: 'panel form', 'aria-labelledby': id }, h('div', { class: 'form__head' }, h('h2', { id }, title), note && h('p', { class: 'form__note' }, note)), ...body)
 
-    const source =
-      catalog.source === 'claude-code'
-        ? `Models and effort levels come from Claude Code’s list for your account${catalog.fetchedAt ? `, as of ${new Date(catalog.fetchedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}` : ''}.`
-        : 'Claude Code’s model list wasn’t found on this computer, so these are enki’s built-in models. Open /model in Claude Code once to fetch yours.'
-    const roles = panel(
-      'roles-h',
-      'Agent roles',
-      'The model, effort level and skills each role starts with.',
-      h('p', { class: 'field__help form__source' }, source),
-      ROLES.map(role => {
-        const team = () => d().team[role]
-        const current = s.saved.team[role].model
-        const info = () => catalog.models.find(model => model.id === team().model)
-        const group = (name, list) => list.length > 0 && { group: name, options: list.map(model => [model.id, model.label]) }
-        const models = [group('Latest', catalog.models.filter(model => model.latest)), group('Older', catalog.models.filter(model => !model.latest)), !modelIds.has(current) && { group: 'In config.json', options: [[current, current]] }].filter(Boolean)
-        // Only the levels the chosen model offers, plus the current one if it isn't among them, so it shows.
-        const levels = () => info()?.efforts ?? data.options.efforts
-        const efforts = () => {
-          const list = levels().map(level => [level, EFFORT_LABELS[level] ?? level])
-          return levels().includes(team().effort) ? list : [...list, [team().effort, levels().length ? `${EFFORT_LABELS[team().effort] ?? team().effort} (not offered)` : 'Not available']]
-        }
-        return h(
-          'div',
-          { class: 'rolerow' },
-          h('div', { class: 'rolerow__name' }, chip(role, 14), h('span', {}, ROLE_NAME[role])),
-          field(s, {
-            id: `model-${role}`,
-            label: 'Model',
-            err: `team.${role}.model`,
-            help: () => info()?.description ?? `Not in ${catalog.source === 'claude-code' ? 'Claude Code’s list for your account' : 'the model list'}.`,
-            warn: () => (info() && !info().autoMode && ro.permissionMode === 'auto' ? `${info().label} can’t run in auto permission mode, which this project’s workers use.${info().autoModeNote ? ` ${info().autoModeNote}.` : ''}` : null),
-            control: select(s, { id: `model-${role}`, options: models, get: () => team().model, set: value => (team().model = value) }),
-          }),
-          field(s, {
-            id: `effort-${role}`,
-            label: 'Effort',
-            err: `team.${role}.effort`,
-            help: () => (levels().length === 0 ? 'This model has no effort setting.' : info()?.defaultEffort ? `Claude Code’s default: ${EFFORT_LABELS[info().defaultEffort] ?? info().defaultEffort}.` : ''),
-            control: select(s, { id: `effort-${role}`, options: efforts, disabled: () => levels().length === 0, get: () => team().effort, set: value => (team().effort = value) }),
-          }),
-          skillPicker(s, role),
-        )
-      }),
-    )
-
+    const flows = data.options.workflows ?? []
+    const flowOf = id => flows.find(item => item.id === id)
     const workflow = panel(
       'flow-h',
       'Workflow',
-      'How sessions become the orchestrator, and how many times the team retries.',
+      'Which workflow new tasks run, and how sessions become the orchestrator.',
       h(
         'div',
         { class: 'form__grid' },
-        field(s, { id: 'set-fix', label: 'Fix rounds', err: 'maxFixRounds', help: 'How many times the team retries after a failed test or review. 0 or more; default 3.', control: input(s, { id: 'set-fix', numeric: true, get: () => d().maxFixRounds, set: value => (d().maxFixRounds = value) }) }),
+        h(
+          'div',
+          { class: 'field' },
+          field(s, {
+            id: 'set-flow',
+            label: 'Default workflow',
+            err: 'workflow',
+            help: () => flowOf(d().workflow)?.description ?? '',
+            control: select(s, {
+              id: 'set-flow',
+              options: () => [
+                ...flows.filter(item => item.runnable || item.id === d().workflow).map(item => [item.id, `${item.name}${item.source === 'builtin' ? '' : ` (${item.source})`}${item.runnable ? '' : ', can’t run'}`]),
+                ...(flowOf(d().workflow) ? [] : [[d().workflow, `${d().workflow} (not found)`]]),
+              ],
+              get: () => d().workflow,
+              set: value => (d().workflow = value),
+            }),
+          }),
+          h('a', { class: 'field__link', href: libraryHref(s.id) }, 'Workflows in the library'),
+          h('p', { class: 'field__help' }, 'Agents are set up once, on the Agents page, for every project. To give this project’s steps another model, effort or skills, set them on the workflow’s steps in the studio.'),
+        ),
         field(s, {
           id: 'set-act',
           label: 'Activation',
@@ -790,7 +557,7 @@ export function createSettings({ h, svg, chip, getJson, onDirty }) {
     })
     const bar = h('div', { class: 'savebar' }, barText, h('div', { class: 'savebar__actions' }, discard, save))
 
-    s.root.replaceChildren(header, roles, workflow, timeouts, browser, database, setup, bar)
+    s.root.replaceChildren(header, workflow, timeouts, browser, database, setup, bar)
     update(s, { edited: false })
   }
 
@@ -866,4 +633,5 @@ export function createSettings({ h, svg, chip, getJson, onDirty }) {
   }
 }
 
-const ROLE_NAME = { scout: 'Scout', coder: 'Coder', tester: 'Tester', qa: 'QA', reviewer: 'Reviewer' }
+
+/** A role's name as the project's settings know it. */

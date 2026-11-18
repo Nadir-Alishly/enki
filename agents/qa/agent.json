@@ -1,0 +1,28 @@
+{
+  "id": "qa",
+  "name": "QA",
+  "type": "qa",
+  "capabilities": {
+    "write": "none",
+    "blind": true,
+    "browser": true,
+    "server": true
+  },
+  "outcomes": [
+    {
+      "id": "pass",
+      "description": "Everything on the list works"
+    },
+    {
+      "id": "bug",
+      "description": "Something on the list is broken: details and evidence in the report"
+    },
+    {
+      "id": "blocked",
+      "description": "Couldn't test: the reason is in the report"
+    }
+  ],
+  "model": "claude-haiku-5-5",
+  "effort": "high",
+  "timeout": 1800000
+}

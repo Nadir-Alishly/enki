@@ -1,0 +1,33 @@
+{
+  "id": "full",
+  "name": "Full",
+  "description": "The whole team: the scout explores, the planner writes the plan for your approval, the coder and tester work in parallel, QA checks the running software, enki runs the tests, and the reviewer reads the change. Problems go back to the coder, and failing tests to the tester as well, up to 3 times per kind.",
+  "version": 2,
+  "nodes": [
+    {"id": "start", "kind": "start"},
+    {"id": "scout", "agent": "scout"},
+    {"id": "planner", "agent": "planner"},
+    {"id": "approval", "kind": "approval"},
+    {"id": "coder", "agent": "coder"},
+    {"id": "tester", "agent": "tester"},
+    {"id": "qa", "agent": "qa"},
+    {"id": "verify", "kind": "verify"},
+    {"id": "reviewer", "agent": "reviewer"},
+    {"id": "end", "kind": "end"}
+  ],
+  "edges": [
+    {"from": "start", "on": "request", "to": "scout"},
+    {"from": "scout", "on": "done", "to": "planner"},
+    {"from": "planner", "on": "ready", "to": "approval"},
+    {"from": "approval", "on": "approved", "to": ["coder", "tester"]},
+    {"from": "approval", "on": "changes", "to": "planner"},
+    {"from": "coder", "on": "done", "to": ["verify", "qa"]},
+    {"from": "tester", "on": "done", "to": "verify"},
+    {"from": "verify", "on": "pass", "to": "reviewer"},
+    {"from": "verify", "on": "fail", "to": ["coder", "tester"], "max": 3},
+    {"from": "qa", "on": "pass", "to": "end"},
+    {"from": "qa", "on": "bug", "to": ["coder", "tester"], "max": 3},
+    {"from": "reviewer", "on": "approve", "to": "end"},
+    {"from": "reviewer", "on": "changes", "to": "coder", "max": 3}
+  ]
+}

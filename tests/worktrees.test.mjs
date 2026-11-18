@@ -53,16 +53,11 @@ function started(config, options) {
 
 /** Takes a task to the point it may finish: approved, tested, reviewed. */
 function readyToFinish(project, plan = '# Plan\n', slug = 'demo', pane = {}) {
-  project.write(join(project.taskDir(slug), 'scout.md'), 'x')
-  project.enki(['phase', 'planning'], pane)
-  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan } }, { ...IDENTITY, ...pane })
+  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: project.planReady(plan, pane) } }, { ...IDENTITY, ...pane })
   const team = project.enki(['team', 'start'], pane)
   assert.equal(team.code, 0, team.err)
   project.write(join(project.taskDir(slug), 'requirements.md'), '# Requirements\n\nGoal: say hello properly.\n')
-  project.write(join(project.taskDir(slug), 'tests.md'), 'x')
-  assert.equal(project.enki(['verify'], pane).code, 0)
-  project.write(join(project.taskDir(slug), 'qa-r1.md'), 'x')
-  project.write(join(project.taskDir(slug), 'reviewer-r1.md'), 'x')
+  project.runWorkflow(slug, pane)
 }
 
 // Refusals: nothing is created when any check fails
@@ -226,7 +221,7 @@ test('env values fill in ports, and land in copied env files and worker panes', 
   assert.match(envFile, /^TASK_NAME=app_demo$/m)
   assert.match(envFile, /SECRET=real-value/, 'other keys are kept')
   assert.match(readFileSync(join(project.web, '.env'), 'utf8'), /PORT=3000/, 'the main tree is untouched')
-  const pane = Object.values(project.herdr.read().panes).find(item => item.env.ENKI_ROLE === 'coder')
+  const pane = Object.values(project.herdr.read().panes).find(item => item.env.ENKI_STEP === 'coder')
   assert.equal(pane.env.API_URL, `http://127.0.0.1:${port}/api`)
 })
 
@@ -247,9 +242,7 @@ function databaseProject(plan, extra = {}) {
     },
   })
   project.enki(['task', 'new', 'dark-mode'])
-  project.write(join(project.taskDir('dark-mode'), 'scout.md'), 'x')
-  project.enki(['phase', 'planning'])
-  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan } }, IDENTITY)
+  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: project.planReady(plan) } }, IDENTITY)
   return project
 }
 
@@ -303,9 +296,7 @@ test('Database: shared leaves the env alone', () => {
 test('a failing database copy stops the team from starting', () => {
   const project = gitProject({ database: { copy: 'echo no such template >&2; exit 1' } })
   project.enki(['task', 'new', 'demo'])
-  project.write(join(project.taskDir('demo'), 'scout.md'), 'x')
-  project.enki(['phase', 'planning'])
-  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: '# Plan' } }, IDENTITY)
+  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: project.planReady('# Plan') } }, IDENTITY)
   const result = project.enki(['team', 'start'])
   assert.match(result.err, /no such template/)
   assert.equal(project.herdr.calls('agent', 'start', 'coder-demo').length, 0)
@@ -313,9 +304,7 @@ test('a failing database copy stops the team from starting', () => {
 
 test('without a database section, the plan line is ignored', () => {
   const project = started()
-  project.write(join(project.taskDir('demo'), 'scout.md'), 'x')
-  project.enki(['phase', 'planning'])
-  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: 'Database: copy' } }, IDENTITY)
+  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: project.planReady('Database: copy') } }, IDENTITY)
   assert.equal(project.state('demo').database, null)
 })
 
@@ -323,9 +312,7 @@ test('without a database section, the plan line is ignored', () => {
 
 test('Scope: deps replaces the link with a real install', () => {
   const project = started({ worktree: { install: 'mkdir node_modules && touch node_modules/installed' } })
-  project.write(join(project.taskDir('demo'), 'scout.md'), 'x')
-  project.enki(['phase', 'planning'])
-  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: 'Scope: deps' } }, IDENTITY)
+  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: project.planReady('Scope: deps') } }, IDENTITY)
   assert.equal(project.enki(['team', 'start']).code, 0)
   const modules = join(worktreeOf(project), 'node_modules')
   assert.ok(!lstatSync(modules).isSymbolicLink())
@@ -335,9 +322,7 @@ test('Scope: deps replaces the link with a real install', () => {
 
 test('Scope: deps without an install command is refused', () => {
   const project = started()
-  project.write(join(project.taskDir('demo'), 'scout.md'), 'x')
-  project.enki(['phase', 'planning'])
-  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: 'Scope: deps' } }, IDENTITY)
+  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: project.planReady('Scope: deps') } }, IDENTITY)
   assert.match(project.enki(['team', 'start']).err, /worktree\.install isn't set/)
 })
 
@@ -472,9 +457,7 @@ test('the orchestrator cannot edit a worktree', () => {
 
 test('the coder\'s changes in a worktree are hidden from the tester', () => {
   const project = started()
-  project.write(join(project.taskDir('demo'), 'scout.md'), 'x')
-  project.enki(['phase', 'planning'])
-  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: '# Plan' } }, IDENTITY)
+  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: project.planReady('# Plan') } }, IDENTITY)
   project.enki(['team', 'start'])
   const path = join(worktreeOf(project), 'src/app.js')
   writeFileSync(path, 'changed by the coder\n')
@@ -515,8 +498,6 @@ test('worktree, ports and database settings are validated', async () => {
     { database: { drop: 'x', other: 1 } },
     { database: { enabled: 'no' } },
     { database: { default: 'copies' } },
-    { team: { coder: { effort: 'huge' } } },
-    { team: { coder: { model: '' } } },
     { repos: [{ path: 'web', worktree: { install: 5 } }] },
   ]
   for (const config of bad) assert.throws(() => validateConfig(config), ConfigError, JSON.stringify(config))

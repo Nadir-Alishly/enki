@@ -12,7 +12,9 @@ export function readInput() {
 
 /** Cheap check that runs in every session on the machine, so it reads no config. */
 export function locate(input, env = process.env) {
-  if (env.ENKI_ROLE) return { role: env.ENKI_ROLE, root: env.ENKI_PROJECT ?? null, worker: true }
+  // ENKI_ROLE is the name workers started before steps had their own had.
+  const step = env.ENKI_STEP || env.ENKI_ROLE
+  if (step) return { role: step, root: env.ENKI_PROJECT ?? null, worker: true }
   const root = findProjectRoot(input.cwd ?? env.CLAUDE_PROJECT_DIR ?? process.cwd())
   return root ? { role: 'orchestrator', root, worker: false } : null
 }

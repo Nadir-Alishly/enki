@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, openSync, closeSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { loadSecrets, redact } from './secrets.mjs'
 
 export const STATE_VERSION = 1
 export const EVENT_VERSION = 1
@@ -80,7 +81,7 @@ export function recordEvent(taskDir, type, data = {}) {
     type,
     data,
   }
-  appendFileSync(join(taskDir, 'events.jsonl'), `${JSON.stringify(line)}\n`)
+  appendFileSync(join(taskDir, 'events.jsonl'), `${redact(JSON.stringify(line), loadSecrets(state.projectId))}\n`)
   return line
 }
 
@@ -90,7 +91,7 @@ export function readEvents(taskDir) {
   return readFileSync(path, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
 }
 
-export function createState({ taskDir, slug, projectId, projectRoot, repos, orchestratorPane, worktrees = [], env = {} }) {
+export function createState({ taskDir, slug, projectId, projectRoot, repos, orchestratorPane, worktrees = [], env = {}, team = {}, workflow = null, run = null }) {
   const now = new Date().toISOString()
   const state = {
     v: STATE_VERSION,
@@ -117,6 +118,12 @@ export function createState({ taskDir, slug, projectId, projectRoot, repos, orch
     env,
     database: null,
     herdr: { tab: null, panes: {} },
+    // Each step's role, as it was when the task started: what the policy enforces for it.
+    team,
+    // The workflow the task runs: chosen at creation, and again by the approved plan.
+    workflow,
+    workflowProblems: null,
+    run,
     agents: {},
     servers: {},
     seq: 0,

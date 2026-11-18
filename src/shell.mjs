@@ -44,6 +44,8 @@ function tokenize(text) {
   let tokens = []
   let word = null
   let start = 0
+  // How many ( … ) subshells the current part sits in.
+  let depth = 0
   const pendingHeredocs = []
 
   const flushWord = () => {
@@ -52,7 +54,7 @@ function tokenize(text) {
   }
   const flushSegment = end => {
     flushWord()
-    if (tokens.length > 0) segments.push({ raw: text.slice(start, end).trim(), tokens })
+    if (tokens.length > 0) segments.push({ raw: text.slice(start, end).trim(), tokens, depth })
     tokens = []
   }
 
@@ -100,6 +102,8 @@ function tokenize(text) {
       i = stop
     } else if (c === '(' || c === ')' || c === '{' && (text[i + 1] === ' ' || text[i + 1] === '\n') || c === '}' && word === null) {
       flushSegment(i)
+      if (c === '(') depth += 1
+      else if (c === ')') depth = Math.max(0, depth - 1)
       start = i + 1
     } else if (c === '\n') {
       flushSegment(i)
@@ -196,6 +200,24 @@ export function parseCommand(command, depth = 0) {
     }
   }
   for (const body of nested) commands.push(...parseCommand(body, depth + 1))
+  return commands
+}
+
+const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!'])
+
+/**
+ * The commands a script runs at its top level: not those inside a subshell, `$(…)` or an `if` body
+ * written as one, with a leading shell keyword (`then`, `else`…) and wrappers removed.
+ */
+export function topLevelCommands(command) {
+  const commands = []
+  for (const { tokens, depth } of tokenize(command).segments) {
+    if (depth > 0) continue
+    let rest = tokens
+    while (KEYWORDS.has(rest[0])) rest = rest.slice(1)
+    const real = unwrap(rest)
+    if (real.length > 0) commands.push({ text: real.join(' '), tokens: real })
+  }
   return commands
 }
 

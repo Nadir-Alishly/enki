@@ -1,6 +1,6 @@
 // The `enki` command. Output is short on purpose: it lands in the orchestrator's context.
 import { execFileSync, spawn } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { ConfigError, DEFAULTS, findProjectRoot, ROLES } from './config.mjs'
@@ -14,21 +14,33 @@ import * as task from './task.mjs'
 import { EnkiError, EXIT } from './task.mjs'
 import { raiseDashboardWindow } from './focus.mjs'
 import { writeRules } from './rules.mjs'
+import * as library from './library.mjs'
+import { LibraryError } from './library.mjs'
+import { loadRoles, stepCapabilities } from './agents.mjs'
+import { phasesOf, readWorkflowSnapshot, upgradeWorkflow, workflowProblems } from './workflow.mjs'
 import { readState, resolveTask } from './state.mjs'
+import { loadSecrets, removeSecret, setSecret } from './secrets.mjs'
 
 const USAGE = `enki: orchestration for Claude Code on herdr
 
 Setup     enki doctor | enki init | enki validate | enki skills [--available]
-Task      enki task new <slug> [--repo <name>]... | enki resume <slug> | enki status
-Team      enki team start | enki start <role>
-Work      enki ask <role> <brief-file> [--step <n>] [--report <file>] [--timeout <ms>]
+Task      enki task new <slug> [--repo <name>]... [--workflow <id>] | enki resume <slug> | enki status
+Team      enki team start | enki start <step>
+Work      enki next | enki ask <step> <brief-file> [--step <n>[,<n>…]] [--report <file>] [--timeout <ms>]
+          enki resume <step> [--note "..."] | enki outcome <step> <outcome> --by user [--note "..."]
+          enki report <outcome> (workers)
           enki step <n> todo|active|done|failed
           enki verify [--baseline] [--known-failures]
-          enki wait <role> [--timeout <ms>] | enki read <role> [--lines <n>]
-          enki answer <role> <option|trust> [--by user]
+          enki wait <step> [--timeout <ms>] | enki read <step> [--lines <n>]
+          enki answer <step> <option|trust> [--by user]
 Server    enki server start|stop|restart|status [--repo <name>]
+Secrets   enki secret set <name> [<value>] | get <name> | list | remove <name>
 Memory    enki migrate --memory repo|private | enki memory sync | enki memory merge <slug>
-Progress  enki phase <name> | enki phase done --abandon | enki round next | enki rules
+Progress  enki phase <name> | enki phase done --abandon | enki rules
+Workflows enki workflow list | show <id> | use <id> | copy <id> <new-id> [--to library|project]
+          enki workflow export <id> [--out <file>] | validate <file> | import <file> --by user
+Agents    enki agent list | show <id> | copy <id> <new-id> | export <id> [--out <file>]
+          enki agent validate <file> | import <file> --by user
 Dashboard enki dashboard [--open] | enki dashboard status|stop|link
 Browser   enki playwright status | enki playwright install [--browser]
           enki browser acquire | enki browser release (chrome driver only)
@@ -36,9 +48,24 @@ Browser   enki playwright status | enki playwright install [--browser]
 Add --task <slug> to act on a task other than the one bound to this pane.
 Exit codes: 0 ok, 1 failed, 2 usage, 3 blocked, 4 timeout, 5 busy, 6 stalled.`
 
-/** Workers may look. QA also runs the browser and the server. The rest belongs to the orchestrator. */
-const WORKER_COMMANDS = new Set(['status', 'doctor', 'help'])
-const QA_COMMANDS = new Set(['browser', 'server'])
+/** Workers may look. A step whose role has the server or browser capability also runs those. */
+// Workers may read a secret a brief names, never set or remove one: the command itself checks.
+const WORKER_COMMANDS = new Set(['status', 'doctor', 'help', 'report', 'secret'])
+const CAPABILITY_COMMANDS = { server: 'server', browser: 'browser' }
+
+/** The step this process is a worker for, if any. ENKI_ROLE is the older name. */
+const workerStep = () => process.env.ENKI_STEP || process.env.ENKI_ROLE || null
+
+function workerMay(name) {
+  if (WORKER_COMMANDS.has(name)) return true
+  const capability = CAPABILITY_COMMANDS[name]
+  if (!capability || !process.env.ENKI_TASK) return false
+  try {
+    return Boolean(stepCapabilities(readState(process.env.ENKI_TASK), workerStep())?.[capability])
+  } catch {
+    return false
+  }
+}
 
 const OPTIONS = {
   task: { type: 'string' },
@@ -56,6 +83,10 @@ const OPTIONS = {
   browser: { type: 'boolean' },
   open: { type: 'boolean' },
   quiet: { type: 'boolean' },
+  note: { type: 'string' },
+  workflow: { type: 'string' },
+  to: { type: 'string' },
+  out: { type: 'string' },
   help: { type: 'boolean', short: 'h' },
 }
 
@@ -72,8 +103,9 @@ const number = value => {
   return parsed
 }
 
+/** A step's id. Which steps exist depends on the task's workflow, so the task checks the rest. */
 const role = value => {
-  if (!ROLES.includes(value)) throw new EnkiError(`Role must be one of: ${ROLES.join(', ')}`, EXIT.usage)
+  if (typeof value !== 'string' || !/^[a-z][a-z0-9-]*$/.test(value)) throw new EnkiError('Name a step, such as coder or qa.', EXIT.usage)
   return value
 }
 
@@ -210,14 +242,48 @@ const commands = {
     }
     throw new EnkiError('Usage: enki memory sync | enki memory merge <slug>', EXIT.usage)
   },
+  secret(args) {
+    const [action, name, ...rest] = args
+    const root = requireRoot()
+    if (workerStep() && !['get', 'list'].includes(action)) throw new EnkiError('Workers only read secrets: enki secret get <name>.', EXIT.usage)
+    const config = loadProjectConfig(root)
+    if (action === 'list') {
+      const names = Object.keys(loadSecrets(config.id))
+      return console.log(names.length ? names.join('\n') : 'No secrets. Store one with: enki secret set <name> <value>')
+    }
+    if (!name) throw new EnkiError('Usage: enki secret set <name> [<value>] | get <name> | list | remove <name>', EXIT.usage)
+    if (action === 'get') {
+      const value = loadSecrets(config.id)[name]
+      if (value === undefined) throw new EnkiError(`No secret "${name}". See: enki secret list`, EXIT.failed)
+      return process.stdout.write(`${value}\n`)
+    }
+    if (action === 'remove') return console.log(removeSecret(config.id, name) ? `Removed ${name}.` : `No secret "${name}".`)
+    if (action !== 'set') throw new EnkiError('Usage: enki secret set <name> [<value>] | get <name> | list | remove <name>', EXIT.usage)
+    // From the argument, else from stdin, so a value can stay off the command line.
+    const value = rest.length ? rest.join(' ') : process.stdin.isTTY ? '' : readFileSync(0, 'utf8').replace(/\r?\n$/, '')
+    try {
+      setSecret(task.ensureProjectId(root, config), name, value)
+    } catch (error) {
+      throw new EnkiError(error.message, EXIT.usage)
+    }
+    console.log(`Stored ${name}, outside the repo. Name it in briefs: an agent reads it with enki secret get ${name}. Enki keeps its value out of its logs, and refuses to write it into files.`)
+  },
   skills(args, flags) {
     const lines = task.skillsReport({ root: requireRoot(), available: flags.available })
     console.log(lines.length > 0 ? lines.join('\n') : 'None found.')
   },
   async task(args, flags) {
-    if (args[0] !== 'new' || !args[1]) throw new EnkiError('Usage: enki task new <slug> [--repo <name>]...', EXIT.usage)
-    const state = await task.newTask({ root: requireRoot(), slug: args[1], repoNames: flags.repo ?? [] })
-    console.log(`Task ${state.id} created. Scout running: ${state.agents.scout.name}\nFolder: ${state.taskDir}\nTab: ${state.herdr.tab}`)
+    if (args[0] !== 'new' || !args[1]) throw new EnkiError('Usage: enki task new <slug> [--repo <name>]... [--workflow <id>]', EXIT.usage)
+    const state = await task.newTask({ root: requireRoot(), slug: args[1], repoNames: flags.repo ?? [], workflow: flags.workflow ?? null })
+    const running = Object.values(state.agents).map(agent => agent.name)
+    console.log(
+      [
+        `Task ${state.id} created, workflow ${state.workflow}. Running: ${running.join(', ') || 'nothing yet'}`,
+        `Folder: ${state.taskDir}`,
+        `Tab: ${state.herdr.tab}`,
+        `Next: write the user's request to ${state.taskDir}/request.md in their own words, then: enki next`,
+      ].join('\n'),
+    )
   },
   async team(args, flags) {
     const root = requireRoot()
@@ -230,13 +296,14 @@ const commands = {
     const root = requireRoot()
     const current = resolveTask(root, { slug: flags.task })
     if (!current) throw new EnkiError('No task is bound to this pane.')
-    if (target !== 'scout' && !current.approved) throw new EnkiError('Only the scout can start before the plan is approved.')
+    const early = current.run ? phasesOf(readWorkflowSnapshot(current.taskDir)).before.has(target) : current.team?.[target]?.intake
+    if (!early && !current.approved) throw new EnkiError('Only the steps before the plan (such as the scout and the planner) can start before it is approved.')
     console.log(`Running: ${await task.startRole(current.taskDir, target)}`)
   },
   async ask(args, flags) {
-    if (args.length !== 2) throw new EnkiError('Usage: enki ask <role> <brief-file>', EXIT.usage)
+    if (args.length !== 2) throw new EnkiError('Usage: enki ask <step> <brief-file>', EXIT.usage)
     return emitResult(
-      await task.ask({ root: requireRoot(), slug: flags.task, role: role(args[0]), briefPath: args[1], report: flags.report, step: flags.step === undefined ? undefined : number(flags.step), timeout: number(flags.timeout) }),
+      await task.ask({ root: requireRoot(), slug: flags.task, role: role(args[0]), briefPath: args[1], report: flags.report, step: flags.step === undefined ? undefined : String(flags.step).split(',').map(item => number(item.trim())), timeout: number(flags.timeout) }),
     )
   },
   async wait(args, flags) {
@@ -251,20 +318,87 @@ const commands = {
   },
   async verify(args, flags) {
     return emitResult(
-      await task.verify({ root: requireRoot(), slug: flags.task, baseline: flags.baseline, knownFailures: flags['known-failures'], timeout: number(flags.timeout) }),
+      await task.verify({ root: requireRoot(), slug: flags.task, step: args[0] ?? null, baseline: flags.baseline, knownFailures: flags['known-failures'], timeout: number(flags.timeout) }),
     )
   },
+  workflow(args, flags) {
+    const root = findProjectRoot()
+    const [action, id, extra] = args
+    if (action === 'list' || action === undefined) return console.log(library.listText(root, root ? loadProjectConfig(root).workflow : null))
+    if (action === 'show' && id) return console.log(library.showText(root, id))
+    if (action === 'use' && id) return console.log(library.useWorkflow(requireRoot(), id))
+    if (action === 'copy' && id && extra) return console.log(library.copyWorkflow(root, id, extra, flags.to))
+    if (action === 'export' && id) {
+      const bundle = `${JSON.stringify(library.exportWorkflow(root, id), null, 2)}\n`
+      if (!flags.out) return process.stdout.write(bundle)
+      writeFileSync(flags.out, bundle)
+      return console.log(`Exported ${id} to ${flags.out}.`)
+    }
+    if (action === 'validate' && id) {
+      const bundle = library.readBundle(id)
+      const { problems, warnings } = bundle.format ? library.inspectImport(root, bundle, flags.to) : { problems: workflowProblems(upgradeWorkflow(bundle), loadRoles(root)), warnings: [] }
+      console.log([problems.length ? `Problems:\n${problems.map(problem => `  - ${problem}`).join('\n')}` : 'Sound: it can be used.', ...warnings.map(warning => `warning: ${warning}`)].join('\n'))
+      return problems.length ? EXIT.failed : EXIT.ok
+    }
+    if (action === 'import' && id) {
+      if (flags.by !== undefined && flags.by !== 'user') throw new EnkiError('--by only accepts "user".', EXIT.usage)
+      return console.log(library.importText(root, library.readBundle(id), { to: flags.to, by: flags.by }))
+    }
+    throw new EnkiError('Usage: enki workflow list | show <id> | use <id> | copy <id> <new-id> [--to library|project] | export <id> [--out <file>] | validate <file> | import <file> [--to library|project] --by user', EXIT.usage)
+  },
+  /** Agents live in the user's library, for every project. */
+  agent(args, flags) {
+    const root = findProjectRoot()
+    const [action, id, extra] = args
+    if (action === 'list' || action === undefined) return console.log(library.listAgentsText(root))
+    if (action === 'show' && id) return console.log(library.showAgentText(root, id))
+    if (action === 'copy' && id && extra) return console.log(library.copyAgent(root, id, extra))
+    if (action === 'export' && id) {
+      const bundle = `${JSON.stringify(library.exportAgent(root, id), null, 2)}\n`
+      if (!flags.out) return process.stdout.write(bundle)
+      writeFileSync(flags.out, bundle)
+      return console.log(`Exported ${id} to ${flags.out}.`)
+    }
+    if (action === 'validate' && id) {
+      const { problems, warnings } = library.inspectAgentImport(root, library.readBundle(id))
+      console.log([problems.length ? `Problems:\n${problems.map(problem => `  - ${problem}`).join('\n')}` : 'Sound: it can be imported.', ...warnings.map(warning => `warning: ${warning}`)].join('\n'))
+      return problems.length ? EXIT.failed : EXIT.ok
+    }
+    if (action === 'import' && id) {
+      if (flags.by !== undefined && flags.by !== 'user') throw new EnkiError('--by only accepts "user".', EXIT.usage)
+      const bundle = library.readBundle(id)
+      if (bundle?.format !== library.AGENT_FORMAT) throw new EnkiError(`${id} isn't an agent export. A workflow imports with: enki workflow import ${id} --by user`, EXIT.usage)
+      return console.log(library.importText(root, bundle, { by: flags.by }))
+    }
+    throw new EnkiError('Usage: enki agent list | show <id> | copy <id> <new-id> | export <id> [--out <file>] | validate <file> | import <file> --by user', EXIT.usage)
+  },
+  next(args, flags) {
+    console.log(task.next({ root: requireRoot(), slug: flags.task }))
+  },
+  report(args) {
+    if (args.length !== 1) throw new EnkiError('Usage: enki report <outcome>', EXIT.usage)
+    console.log(task.reportOutcome({ outcome: args[0] }))
+  },
+  outcome(args, flags) {
+    if (args.length !== 2) throw new EnkiError('Usage: enki outcome <step> <outcome> --by user [--note "..."]', EXIT.usage)
+    console.log(task.overrideOutcome({ root: requireRoot(), slug: flags.task, step: role(args[0]), outcome: args[1], by: flags.by, note: flags.note ?? null }))
+  },
   async answer(args, flags) {
-    if (args.length !== 2) throw new EnkiError('Usage: enki answer <role> <option|trust> [--by user]', EXIT.usage)
+    if (args.length !== 2) throw new EnkiError('Usage: enki answer <step> <option|trust> [--by user]', EXIT.usage)
     if (flags.by !== undefined && flags.by !== 'user') throw new EnkiError('--by only accepts "user".', EXIT.usage)
     console.log(await task.answer({ root: requireRoot(), slug: flags.task, role: role(args[0]), choice: args[1], by: flags.by }))
   },
   async status(args, flags) {
     console.log(await task.status({ root: requireRoot(), slug: flags.task }))
   },
-  async resume(args) {
-    if (!args[0]) throw new EnkiError('Usage: enki resume <slug>', EXIT.usage)
-    console.log(await task.resume({ root: requireRoot(), slug: args[0] }))
+  async resume(args, flags) {
+    if (!args[0]) throw new EnkiError('Usage: enki resume <step> [--note "..."] | enki resume <slug>', EXIT.usage)
+    const root = requireRoot()
+    // A step of the bound task that's with the orchestrator goes back to work; anything else is a task to pick up.
+    const bound = resolveTask(root, { slug: flags.task })
+    if (bound?.run?.steps[args[0]]?.status === 'handed-off') return console.log(task.resumeHandedOff({ root, slug: flags.task, step: args[0], note: flags.note }))
+    if (flags.note !== undefined) throw new EnkiError(`${args[0]} isn't a step that's with you, so there's nothing to resume with a note.`)
+    console.log(await task.resume({ root, slug: args[0] }))
   },
   async phase(args, flags) {
     const { phase, notes } = await task.setPhase({ root: requireRoot(), slug: flags.task, phase: args[0], abandon: flags.abandon })
@@ -274,10 +408,6 @@ const commands = {
     if (!['start', 'stop', 'restart', 'status'].includes(args[0])) throw new EnkiError('Usage: enki server start|stop|restart|status [--repo <name>]', EXIT.usage)
     const lines = await task.serverCommand({ root: requireRoot(), slug: flags.task, action: args[0], repoName: flags.repo?.[0] })
     console.log(lines.length > 0 ? lines.join('\n') : 'No repo in this task has a URL.')
-  },
-  round(args, flags) {
-    if (args[0] !== 'next') throw new EnkiError('Usage: enki round next', EXIT.usage)
-    console.log(`Round: ${task.nextRound({ root: requireRoot(), slug: flags.task })}`)
   },
   rules(args, flags) {
     const root = requireRoot()
@@ -319,8 +449,7 @@ export async function main(argv) {
     console.error(`Unknown command "${name}".\n\n${USAGE}`)
     return EXIT.usage
   }
-  const qaCommand = process.env.ENKI_ROLE === 'qa' && QA_COMMANDS.has(name)
-  if (process.env.ENKI_ROLE && !WORKER_COMMANDS.has(name) && !qaCommand) {
+  if (workerStep() && !workerMay(name)) {
     console.error(`Workers can't run "enki ${name}". Put what you need in your report.`)
     return EXIT.failed
   }
@@ -331,7 +460,7 @@ export async function main(argv) {
       console.error(error.message)
       return error.exitCode
     }
-    if (error instanceof ConfigError || error instanceof herdr.HerdrError || error instanceof MemoryError || error instanceof DashboardError) {
+    if (error instanceof ConfigError || error instanceof herdr.HerdrError || error instanceof MemoryError || error instanceof DashboardError || error instanceof LibraryError) {
       console.error(error.message)
       return EXIT.failed
     }

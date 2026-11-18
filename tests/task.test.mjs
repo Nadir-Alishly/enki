@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
-import { makeProject } from './helpers/harness.mjs'
+import { fullPlan, makeProject } from './helpers/harness.mjs'
 
 const started = (project, slug = 'demo') => {
   const result = project.enki(['task', 'new', slug])
@@ -16,27 +16,34 @@ const approved = (project, plan) => {
   return project
 }
 
+const envelopeOf = (project, name, index) => {
+  const prompt = project.herdr.calls('agent', 'prompt', name).at(index)[3]
+  return readFileSync(prompt.slice(5, -' and follow it.'.length), 'utf8')
+}
+
 const launch = (project, name) => project.herdr.calls('agent', 'start', name)[0]
 
-test('task new creates state, a verified grid and a running scout, and nothing else', () => {
+test('task new creates state, a verified grid and the steps before the plan, and nothing else', () => {
   const project = started(makeProject())
   const state = project.state('demo')
   assert.equal(state.phase, 'intake')
   assert.equal(state.approved, false)
   assert.equal(state.orchestratorPane, 'w1:orch')
   assert.deepEqual(state.repos[0], { name: 'web', workdir: join(project.root, 'web'), url: 'http://localhost:4321', port: 4321, testGlobs: ['tests/**'] })
-  assert.deepEqual(Object.keys(state.herdr.panes).sort(), ['coder', 'qa', 'reviewer', 'scout', 'tester'])
-  assert.deepEqual(Object.keys(state.agents), ['scout'])
+  assert.deepEqual(Object.keys(state.herdr.panes).sort(), ['coder', 'planner', 'qa', 'reviewer', 'scout', 'tester'])
+  assert.deepEqual(Object.keys(state.agents), ['scout', 'planner'])
   assert.ok(existsSync(join(project.taskDir('demo'), 'rules.md')))
-  assert.equal(project.herdr.calls('agent', 'start').length, 1)
+  assert.equal(project.herdr.calls('agent', 'start').length, 2)
+  assert.deepEqual(state.run.steps.scout.inputs, [{ from: 'request' }], 'Start passed the request on: the scout is queued')
+  assert.match(project.enki(['next']).out, /scout: ready, visit 1\. Sent by the user's request/)
 })
 
-test('each pane knows its role and task', () => {
+test('each pane knows its step and task', () => {
   const project = started(makeProject())
   const { panes } = project.state('demo').herdr
   const fake = project.herdr.read().panes
-  for (const role of ['scout', 'coder', 'tester', 'qa', 'reviewer']) {
-    assert.equal(fake[panes[role]].env.ENKI_ROLE, role)
+  for (const role of ['scout', 'planner', 'coder', 'tester', 'qa', 'reviewer']) {
+    assert.equal(fake[panes[role]].env.ENKI_STEP, role)
     assert.equal(fake[panes[role]].env.ENKI_TASK, project.taskDir('demo'))
   }
 })
@@ -69,7 +76,7 @@ test('the none browser driver leaves Chrome off for everyone', () => {
 })
 
 test('team models and permission mode come from config', () => {
-  const project = started(makeProject({ permissionMode: 'acceptEdits', team: { scout: { model: 'custom-model' } } }))
+  const project = started(makeProject({ permissionMode: 'acceptEdits', steps: { scout: { model: 'custom-model' } } }))
   const scout = launch(project, 'scout-demo')
   assert.equal(scout[scout.indexOf('--model') + 1], 'custom-model')
   assert.equal(scout[scout.indexOf('--permission-mode') + 1], 'acceptEdits')
@@ -114,7 +121,7 @@ test('a grid that comes out wrong stops the task', () => {
   project.herdr.script(script => { script.brokenLayout = true })
   const result = project.enki(['task', 'new', 'demo'])
   assert.notEqual(result.code, 0)
-  assert.match(result.err, /three-column grid/)
+  assert.match(result.err, /expected grid/)
 })
 
 // The approval gate
@@ -124,12 +131,12 @@ test('the team cannot start before approval', () => {
   const result = project.enki(['team', 'start'])
   assert.notEqual(result.code, 0)
   assert.match(result.err, /isn't approved/)
-  assert.equal(project.herdr.calls('agent', 'start').length, 1)
+  assert.equal(project.herdr.calls('agent', 'start').length, 2)
 })
 
 test('a role cannot be started around the gate', () => {
   const project = started(makeProject())
-  assert.match(project.enki(['start', 'coder']).err, /before the plan is approved/)
+  assert.match(project.enki(['start', 'coder']).err, /can start before it is approved/)
 })
 
 test('approval cannot be claimed through the CLI', () => {
@@ -154,12 +161,88 @@ test('the ExitPlanMode hook approves, saves the plan and reads team and scope', 
   assert.match(readFileSync(join(project.taskDir('demo'), 'approved-plan.md'), 'utf8'), /Scope: deps/)
 })
 
-test('planning cannot begin before the scout has reported', () => {
+test('planning begins when the planner reports a plan, not by hand', () => {
   const project = started(makeProject())
   const result = project.enki(['phase', 'planning'])
   assert.notEqual(result.code, 0)
-  assert.match(result.err, /no scout report/)
+  assert.match(result.err, /workflow sets this phase/)
   assert.equal(project.state('demo').phase, 'intake')
+  project.planReady()
+  assert.equal(project.state('demo').phase, 'planning')
+  assert.match(project.enki(['next']).out, /Approval: the plan waits for the user\. Present .*planner-r1\.md exactly as written/)
+})
+
+test('a request is written before the first step works', () => {
+  const project = makeProject()
+  project.enki(['task', 'new', 'demo', '--no-request'])
+  assert.match(project.enki(['ask', 'scout', project.brief()]).err, /Write the user's request to .*request\.md first/)
+})
+
+test('the planner’s questions go to the user through the orchestrator, and it resumes with the answers', () => {
+  const project = started(makeProject())
+  project.herdr.script(script => { script.report = { 'planner-demo': ['questions'] } })
+  project.enki(['ask', 'scout', project.brief()])
+  const asked = project.enki(['ask', 'planner', project.brief()])
+  assert.match(asked.out, /planner has questions only the user can answer: .*planner-r1\.md\. Ask the user them with AskUserQuestion/)
+  assert.match(asked.out, /enki resume planner --note "answers added to request\.md"/)
+  assert.equal(project.enki(['resume', 'planner', '--note', 'answers added to request.md']).code, 0)
+  const second = project.enki(['ask', 'planner', project.brief()])
+  assert.equal(second.code, 0, second.err)
+  const envelope = envelopeOf(project, 'planner-demo', 1)
+  assert.match(envelope, /The user's request, with every answer they have given since: .*request\.md/)
+  assert.match(envelope, /From the orchestrator: answers added to request\.md/)
+})
+
+test('the planner learns the workflow from its graph: never from its description, which agents can’t read', () => {
+  const project = makeProject()
+  mkdirSync(join(project.root, '.enki/workflows'), { recursive: true })
+  const full = JSON.parse(readFileSync(join(import.meta.dirname, '../templates/workflows/full.json'), 'utf8'))
+  // A Full that lost its tester, QA and reviewer, still described as the whole team.
+  const lean = {
+    ...full,
+    id: 'lean',
+    name: 'Lean',
+    nodes: full.nodes.filter(node => !['tester', 'qa', 'reviewer'].includes(node.id)),
+    edges: [...full.edges.filter(edge => ['start', 'scout', 'planner', 'approval'].includes(edge.from)).map(edge => (edge.from === 'approval' && edge.on === 'approved' ? { ...edge, to: 'coder' } : edge)), { from: 'coder', on: 'done', to: 'verify' }, { from: 'verify', on: 'pass', to: 'end' }],
+  }
+  writeFileSync(join(project.root, '.enki/workflows/lean.json'), JSON.stringify(lean))
+  project.enki(['task', 'new', 'demo', '--workflow', 'lean'])
+  assert.equal(JSON.parse(readFileSync(join(project.taskDir('demo'), 'workflow.json'), 'utf8')).description, undefined, 'the task’s copy has no description')
+  project.enki(['ask', 'scout', project.brief()])
+  project.report('demo', 'planner-r1.md', fullPlan('# Plan\n\n1. [Coder] Add the toggle and its tests\n'))
+  const asked = project.enki(['ask', 'planner', project.brief()])
+  const envelope = envelopeOf(project, 'planner-demo', 0)
+  assert.doesNotMatch(envelope, /whole team|work in parallel/)
+  assert.match(envelope, /- coder \(Coder: writes code, never tests\)\. done → verify; blocked → back to the orchestrator\./)
+  assert.match(envelope, /No step can write tests/)
+  assert.match(envelope, /When the tests \(verify\) fail, nothing goes back to fix them/)
+  assert.match(envelope, /- full \("Full"\): coder, tester, qa, tests, reviewer/, 'the others it could switch to')
+  // The plan counted on tests nobody can write: it goes back to the planner, not to the user.
+  assert.match(asked.out, /no step in lean can write tests, so the plan has to say "Tests: none"/)
+  assert.equal(project.state('demo').run.steps.approval.status, 'idle')
+  project.enki(['resume', 'planner', '--note', 'No step can write tests.'])
+  project.report('demo', 'planner-r2.md', fullPlan('# Plan\n\nTests: none\n\n1. [Coder] Add the toggle\n'))
+  project.enki(['ask', 'planner', project.brief()])
+  assert.equal(project.state('demo').run.steps.approval.status, 'queued')
+  // Tests that fail with nowhere to go: the orchestrator is told what it can and can't do.
+  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: readFileSync(join(project.taskDir('demo'), 'planner-r2.md'), 'utf8') }, noAutoSteps: true })
+  project.enki(['team', 'start'])
+  project.enki(['ask', 'coder', project.brief(), '--step', '1'])
+  const failed = project.enki(['verify'])
+  assert.match(failed.out, /sends failing tests nowhere, so the run waits\. You can't fix code/)
+})
+
+test('a plan that isn’t the planner’s can’t be presented or approved', () => {
+  const project = started(makeProject())
+  const early = project.hook('pre-tool-use', { tool_name: 'ExitPlanMode', tool_input: { plan: '# My plan' } })
+  assert.match(JSON.stringify(early.json), /No plan is waiting for approval.*never writes one itself/)
+  const plan = project.planReady('# Plan\n\nAdd a button.\n')
+  const edited = project.hook('pre-tool-use', { tool_name: 'ExitPlanMode', tool_input: { plan: `${plan}\nAlso rewrite the API.` } })
+  assert.match(JSON.stringify(edited.json), /isn't the planner's plan as written/)
+  assert.equal(project.hook('pre-tool-use', { tool_name: 'ExitPlanMode', tool_input: { plan: plan.replace(/\n/g, '\n\n') } }).json, null, 'spacing doesn’t matter')
+  const result = project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: '# Something else' }, noAutoSteps: true })
+  assert.match(result.json.hookSpecificOutput.additionalContext, /did NOT record this approval: This isn't the planner's plan/)
+  assert.equal(project.state('demo').approved, false)
 })
 
 test('a plan approved outside the planning phase is not recorded, and the session is told', () => {
@@ -177,14 +260,34 @@ test('an empty plan response approves nothing', () => {
 
 test('a worker cannot approve a plan', () => {
   const project = started(makeProject())
-  project.approve('# Plan', { ENKI_ROLE: 'coder', ENKI_TASK: project.taskDir('demo'), ENKI_PROJECT: project.root })
+  const plan = project.planReady('# Plan')
+  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan } }, { ENKI_ROLE: 'coder', ENKI_TASK: project.taskDir('demo'), ENKI_PROJECT: project.root })
   assert.equal(project.state('demo').approved, false)
 })
 
-test('returning to planning withdraws approval', () => {
-  const project = approved(makeProject())
-  assert.equal(project.enki(['phase', 'planning']).code, 0)
-  assert.equal(project.state('demo').approved, false)
+test('the user’s changes send the plan back to the planner, before approval or after it', () => {
+  const project = started(makeProject())
+  project.planReady()
+  assert.match(project.enki(['outcome', 'approval', 'changes', '--note', 'x']).err, /the user's decision/)
+  assert.match(project.enki(['outcome', 'approval', 'approved', '--by', 'user']).err, /only by accepting the plan dialog/)
+  assert.match(project.enki(['outcome', 'approval', 'changes', '--by', 'user']).err, /in their words/)
+  const back = project.enki(['outcome', 'approval', 'changes', '--by', 'user', '--note', 'Keep the old URL'])
+  assert.equal(back.code, 0, back.err)
+  assert.match(back.out, /changes → planner/)
+  assert.equal(project.state('demo').phase, 'intake')
+  project.report('demo', 'planner-r2.md', fullPlan('# Plan, with the old URL\n'))
+  assert.equal(project.enki(['ask', 'planner', project.brief()]).code, 0)
+  assert.match(envelopeOf(project, 'planner-demo', -1), /The user asked for changes to the plan \(.*planner-r1\.md\): Keep the old URL\. Write the whole plan again/)
+  assert.equal(project.state('demo').run.steps.approval.status, 'queued')
+
+  // After approval, the same: the work stops, and the new plan needs its own approval.
+  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: readFileSync(join(project.taskDir('demo'), 'planner-r2.md'), 'utf8') }, noAutoSteps: true })
+  assert.equal(project.state('demo').approved, true)
+  assert.match(project.enki(['phase', 'planning']).err, /enki outcome approval changes --by user/)
+  assert.equal(project.enki(['outcome', 'approval', 'changes', '--by', 'user', '--note', 'Smaller, please']).code, 0)
+  const state = project.state('demo')
+  assert.equal(state.approved, false)
+  assert.deepEqual(Object.entries(state.run.steps).filter(([, step]) => step.status !== 'idle').map(([id]) => id), ['planner'])
   assert.notEqual(project.enki(['phase', 'coding']).code, 0)
 })
 
@@ -201,22 +304,51 @@ test('ask sends a short prompt, wraps the brief and returns the summary', () => 
   assert.ok(prompt.length < 400)
   const envelope = readFileSync(prompt.slice(5, -' and follow it.'.length), 'utf8')
   assert.match(envelope, /rules\.md/)
-  assert.match(envelope, /scout\.md/)
+  assert.match(envelope, /scout-r1\.md/)
+  assert.match(envelope, /The user's request: .*request\.md/)
   assert.match(envelope, /at most 15 lines/)
 })
 
-test('reports are numbered by round', () => {
-  const project = approved(makeProject())
+
+test('reports are numbered by visit, and the brief lists the outcomes to report', () => {
+  const project = approved(makeProject({ repos: [{ path: 'web', test: ['true'], url: 'http://localhost:4321', testGlobs: ['tests/**'], devServer: { managedBy: 'user' } }] }))
   project.enki(['team', 'start'])
-  project.enki(['round', 'next'])
-  project.enki(['ask', 'coder', project.brief()])
-  const prompt = project.herdr.calls('agent', 'prompt', 'coder-demo')[0][3]
-  assert.match(readFileSync(prompt.slice(5, -' and follow it.'.length), 'utf8'), /coder-r2\.md/)
+  project.herdr.script(script => {
+    script.report = { 'reviewer-demo': ['changes'] }
+  })
+  project.runWorkflow('demo')
+  const first = envelopeOf(project, 'coder-demo', 0)
+  assert.match(first, /coder-r1\.md/)
+  assert.match(first, /enki report done {2}\(The brief is implemented/)
+  assert.match(first, /enki report blocked/)
+  const second = envelopeOf(project, 'coder-demo', 1)
+  assert.match(second, /coder-r2\.md/)
+  assert.match(second, /reviewer reported "changes": .*reviewer-r1\.md/, 'the coder is told what sent it back')
 })
 
-test('workers other than the scout cannot be asked before approval', () => {
+test('a loop stops at its limit, and only the user can take it further', () => {
+  const project = approved(makeProject({ repos: [{ path: 'web', test: ['true'], url: 'http://localhost:4321', testGlobs: ['tests/**'], devServer: { managedBy: 'user' } }] }))
+  project.enki(['team', 'start'])
+  project.herdr.script(script => {
+    script.report = { 'reviewer-demo': ['changes', 'changes', 'changes', 'changes'] }
+  })
+  project.runWorkflow('demo') // stops when nothing is left to start: the reviewer is with the orchestrator
+  const run = project.state('demo').run
+  assert.equal(run.steps.reviewer.status, 'handed-off')
+  assert.match(run.steps.reviewer.reason, /^limit/)
+  assert.equal(run.edges['reviewer:changes'], 3)
+  assert.match(project.enki(['resume', 'reviewer']).err, /Only the user/)
+  assert.match(project.enki(['outcome', 'reviewer', 'approve']).err, /the user's decision/)
+  const user = project.enki(['outcome', 'reviewer', 'approve', '--by', 'user'])
+  assert.equal(user.code, 0, user.err)
+  assert.match(user.out, /approve → end/)
+  assert.ok(project.events('demo').some(event => event.type === 'step.overridden' && event.data.by === 'user'))
+})
+
+
+test('workers after the plan cannot be asked before approval', () => {
   const project = started(makeProject())
-  assert.match(project.enki(['ask', 'coder', project.brief()]).err, /approved/)
+  assert.match(project.enki(['ask', 'coder', project.brief()]).err, /Nothing has sent work to coder yet/)
 })
 
 test('a blocked worker returns at once with exit 3, the screen and the way to answer', () => {
@@ -256,7 +388,7 @@ test('enki wait gives up on an unanswered prompt with exit 3', () => {
   })
   const result = project.enki(['wait', 'scout', '--timeout', '1000'])
   assert.equal(result.code, 3)
-  assert.match(result.out, /still blocked/)
+  assert.match(result.out, /still waiting on a prompt/)
 })
 
 test('an already blocked worker gets no new prompt', () => {
@@ -431,27 +563,14 @@ test('a worker whose hooks never report is treated as a failure', () => {
 
 // Rounds
 
-test('fix rounds stop at the limit', () => {
-  const project = approved(makeProject())
-  for (const expected of [2, 3, 4]) assert.match(project.enki(['round', 'next']).out, new RegExp(`Round: ${expected}`))
-  const result = project.enki(['round', 'next'])
-  assert.notEqual(result.code, 0)
-  assert.match(result.err, /limit reached/)
-  assert.equal(project.state('demo').round, 4)
-})
 
-test('maxFixRounds is configurable', () => {
-  const project = approved(makeProject({ maxFixRounds: 1 }))
-  assert.equal(project.enki(['round', 'next']).code, 0)
-  assert.notEqual(project.enki(['round', 'next']).code, 0)
-})
 
 // Workers
 
 test('workers can look, but cannot run the task', () => {
   const project = started(makeProject())
   const worker = { ENKI_ROLE: 'coder', ENKI_TASK: project.taskDir('demo'), ENKI_PROJECT: project.root }
-  for (const args of [['phase', 'coding'], ['team', 'start'], ['round', 'next'], ['ask', 'scout', 'x']]) {
+  for (const args of [['phase', 'coding'], ['team', 'start'], ['next'], ['resume', 'coder'], ['outcome', 'coder', 'done', '--by', 'user'], ['ask', 'scout', 'x']]) {
     assert.match(project.enki(args, worker).err, /Workers can't/)
   }
   assert.equal(project.enki(['status'], worker).code, 0)
@@ -520,10 +639,9 @@ test('every step lands in the event log with stable IDs', () => {
   project.enki(['team', 'start'])
   project.enki(['ask', 'coder', project.brief()])
   project.enki(['phase', 'coding'])
-  project.enki(['round', 'next'])
   const events = project.events('demo')
   const types = events.map(event => event.type)
-  for (const type of ['task.created', 'team.grid_ready', 'agent.started', 'plan.approved', 'team.started', 'agent.asked', 'agent.finished', 'task.phase', 'task.round']) {
+  for (const type of ['task.created', 'team.grid_ready', 'agent.started', 'plan.approved', 'team.started', 'agent.asked', 'step.started', 'step.reported', 'agent.finished', 'step.outcome', 'task.phase']) {
     assert.ok(types.includes(type), `missing ${type}`)
   }
   for (const event of events) {

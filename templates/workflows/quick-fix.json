@@ -1,0 +1,26 @@
+{
+  "id": "quick-fix",
+  "name": "Quick fix",
+  "description": "For small, well-understood changes: the planner looks at the code and writes the plan, the coder fixes, enki runs the existing tests, and the reviewer reads the change. No scout, no new tests and no QA.",
+  "version": 2,
+  "nodes": [
+    {"id": "start", "kind": "start"},
+    {"id": "planner", "agent": "planner"},
+    {"id": "approval", "kind": "approval"},
+    {"id": "coder", "agent": "coder"},
+    {"id": "verify", "kind": "verify"},
+    {"id": "reviewer", "agent": "reviewer"},
+    {"id": "end", "kind": "end"}
+  ],
+  "edges": [
+    {"from": "start", "on": "request", "to": "planner"},
+    {"from": "planner", "on": "ready", "to": "approval"},
+    {"from": "approval", "on": "approved", "to": "coder"},
+    {"from": "approval", "on": "changes", "to": "planner"},
+    {"from": "coder", "on": "done", "to": "verify"},
+    {"from": "verify", "on": "pass", "to": "reviewer"},
+    {"from": "verify", "on": "fail", "to": "coder", "max": 3},
+    {"from": "reviewer", "on": "approve", "to": "end"},
+    {"from": "reviewer", "on": "changes", "to": "coder", "max": 3}
+  ]
+}

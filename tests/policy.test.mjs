@@ -386,3 +386,14 @@ test('writeTargets sees redirects and common file commands', () => {
   assert.deepEqual(targets('sed s/a/b/ f.txt'), [])
 })
 
+
+test('a start script bans what it launches, not its build steps or housekeeping', () => {
+  // As melda's: env, then a client build in a subshell inside an if, then the launch.
+  const start = 'export PORT={port}; if [ -d ../client/src ]; then (cd ../client && npm run clean && NODE_OPTIONS=--x npx webpack --mode development) || exit 1; export CLIENT_PATH="$(cd ../client && pwd)"; else export CLIENT_PATH=/x; fi; PATH=/usr/bin:$PATH NODE_ENV=development exec node index.js'
+  const extra = { config: { repos: [{ devServer: { start } }] } }
+  for (const command of ['pwd', 'npx webpack --config webpack.client.config.js', 'npm run clean', 'exit 1', 'ls www/dist | wc -l']) {
+    assert.equal(denied('coder', 'Bash', { command }, extra), null, command)
+  }
+  assert.match(denied('coder', 'Bash', { command: 'node index.js' }, extra) ?? '', /enki server/)
+  assert.match(denied('coder', 'Bash', { command: 'PORT=5000 exec node index.js' }, extra) ?? '', /enki server/)
+})

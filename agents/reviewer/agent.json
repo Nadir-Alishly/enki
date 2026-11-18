@@ -1,0 +1,24 @@
+{
+  "id": "reviewer",
+  "name": "Reviewer",
+  "type": "reviewer",
+  "capabilities": {
+    "write": "none",
+    "blind": false,
+    "browser": false,
+    "server": false
+  },
+  "outcomes": [
+    {
+      "id": "approve",
+      "description": "The change is ready: no findings that need a fix"
+    },
+    {
+      "id": "changes",
+      "description": "Findings that need a fix: listed in the report"
+    }
+  ],
+  "model": "claude-sonnet-5-5",
+  "effort": "high",
+  "timeout": 900000
+}

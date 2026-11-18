@@ -8,6 +8,8 @@ import { join } from 'node:path'
 import { enkiHome, writeJsonAtomic } from '../src/state.mjs'
 import { buildId, dashboardDir } from './build.mjs'
 import { fingerprint, herdrAgents, projectDetail, projectList, projects, taskDetail } from './model.mjs'
+import { agentAction, exportAgentBundle, readAgents } from './agents.mjs'
+import { exportBundle, libraryAction, readLibrary } from './library.mjs'
 import { configHashes, projectSkills, readSettings, saveSettings, SettingsError } from './settings.mjs'
 import { TokenCache } from './tokens.mjs'
 
@@ -19,7 +21,8 @@ const build = process.env.ENKI_DASHBOARD_BUILD || buildId()
 const token = randomBytes(16).toString('hex')
 // The settings page sends this with each save. Only a page served from here can read it.
 const editToken = randomBytes(16).toString('hex')
-const MAX_BODY = 64 * 1024
+// An imported workflow carries its roles' instructions, so this is more than a settings save needs.
+const MAX_BODY = 512 * 1024
 const infoPath = join(enkiHome(), 'dashboard.json')
 
 mkdirSync(enkiHome(), { recursive: true })
@@ -30,6 +33,10 @@ const STATIC = {
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/styles.css': ['styles.css', 'text/css; charset=utf-8'],
   '/settings.js': ['settings.js', 'text/javascript; charset=utf-8'],
+  '/library.js': ['library.js', 'text/javascript; charset=utf-8'],
+  '/agents.js': ['agents.js', 'text/javascript; charset=utf-8'],
+  '/graph.js': ['graph.js', 'text/javascript; charset=utf-8'],
+  '/studio.js': ['studio.js', 'text/javascript; charset=utf-8'],
   '/favicon.svg': ['favicon.svg', 'image/svg+xml'],
 }
 
@@ -92,7 +99,11 @@ const server = createServer(async (request, response) => {
     return
   }
   const settingsMatch = /^\/api\/projects\/([\w-]+)\/settings$/.exec(url.pathname)
-  if (request.method === 'POST' && settingsMatch) return saveRequest(request, response, settingsMatch[1])
+  const libraryMatch = /^\/api\/projects\/([\w-]+)\/library$/.exec(url.pathname)
+  const agentsMatch = /^\/api\/projects\/([\w-]+)\/agents$/.exec(url.pathname)
+  if (request.method === 'POST' && settingsMatch) return saveRequest(request, response, settingsMatch[1], saveSettings)
+  if (request.method === 'POST' && libraryMatch) return saveRequest(request, response, libraryMatch[1], libraryAction)
+  if (request.method === 'POST' && agentsMatch) return saveRequest(request, response, agentsMatch[1], agentAction)
   if (request.method !== 'GET') return send(response, 405, { error: 'Not allowed' })
 
   try {
@@ -118,8 +129,28 @@ const server = createServer(async (request, response) => {
     const projectMatch = /^\/api\/projects\/([\w-]+)$/.exec(url.pathname)
     const taskMatch = /^\/api\/projects\/([\w-]+)\/tasks\/([\w.-]+)$/.exec(url.pathname)
     const skillsMatch = /^\/api\/projects\/([\w-]+)\/skills$/.exec(url.pathname)
-    const project = projects().find(item => item.id === (projectMatch ?? taskMatch ?? settingsMatch ?? skillsMatch)?.[1])
-    if ((settingsMatch || skillsMatch) && !project) return send(response, 404, { error: 'No such project' })
+    const exportMatch = /^\/api\/projects\/([\w-]+)\/library\/export\/([\w-]+)$/.exec(url.pathname)
+    const agentExportMatch = /^\/api\/projects\/([\w-]+)\/agents\/export\/([\w-]+)$/.exec(url.pathname)
+    const project = projects().find(item => item.id === (projectMatch ?? taskMatch ?? settingsMatch ?? skillsMatch ?? libraryMatch ?? exportMatch ?? agentsMatch ?? agentExportMatch)?.[1])
+    if ((settingsMatch || skillsMatch || libraryMatch || exportMatch || agentsMatch || agentExportMatch) && !project) return send(response, 404, { error: 'No such project' })
+    if (libraryMatch) return send(response, 200, readLibrary(project))
+    if (agentsMatch) return send(response, 200, readAgents(project))
+    if (exportMatch || agentExportMatch) {
+      const [kind, id] = exportMatch ? ['workflow', exportMatch[2]] : ['agent', agentExportMatch[2]]
+      let bundle
+      try {
+        bundle = kind === 'workflow' ? exportBundle(project, id) : exportAgentBundle(project, id)
+      } catch (error) {
+        return send(response, 404, { error: error.message })
+      }
+      response.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+        'content-disposition': `attachment; filename="${id}.enki-${kind}.json"`,
+      })
+      return response.end(`${JSON.stringify(bundle, null, 2)}\n`)
+    }
     if (settingsMatch) return send(response, 200, readSettings(project))
     if (skillsMatch) return send(response, 200, { skills: projectSkills(project) })
     if (projectMatch) return project ? send(response, 200, projectDetail(project, live, tokens)) : send(response, 404, { error: 'No such project' })
@@ -150,11 +181,11 @@ function readBody(request) {
 }
 
 /**
- * The one write: a project's settings. Only the page served from here can make it: the Origin is
+ * The writes: a project's settings, and its library's actions. Only the page served from here can make it: the Origin is
  * our own, the edit token is one only our page can read, and JSON forces a browser preflight we
  * never answer. The file comes from the project registry, never from the request.
  */
-async function saveRequest(request, response, id) {
+async function saveRequest(request, response, id, handle) {
   if (!allowedOrigins.has(request.headers.origin ?? '')) return send(response, 403, { error: 'Forbidden origin' })
   if (request.headers['x-enki-edit'] !== editToken) return send(response, 403, { error: 'Bad token' })
   if (!/^application\/json\b/.test(request.headers['content-type'] ?? '')) return send(response, 415, { error: 'Send JSON' })
@@ -169,7 +200,7 @@ async function saveRequest(request, response, id) {
       if (error instanceof SettingsError) throw error
       return send(response, 400, { error: 'Invalid JSON' })
     }
-    const saved = saveSettings(project, body)
+    const saved = handle(project, body)
     await refresh().catch(() => {})
     return send(response, 200, saved)
   } catch (error) {

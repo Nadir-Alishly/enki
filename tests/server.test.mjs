@@ -43,7 +43,7 @@ test('team start leaves the server to QA, and QA starts it in its own tab', asyn
   assert.ok(await up(port))
   const { tab, pane } = project.state('demo').servers.web
   assert.notEqual(tab, project.state('demo').herdr.tab)
-  assert.equal(project.herdr.read().panes[pane].env.ENKI_ROLE, undefined)
+  assert.equal(project.herdr.read().panes[pane].env.ENKI_STEP, undefined)
   assert.ok(project.events('demo').some(event => event.type === 'server.started'))
 })
 
@@ -62,7 +62,7 @@ test('team start refuses until the start command is known', async () => {
   const result = project.enki(['team', 'start'])
   assert.notEqual(result.code, 0)
   assert.match(result.err, /Nobody has recorded how to start web/)
-  assert.equal(project.herdr.calls('agent', 'start').length, 1)
+  assert.equal(project.herdr.calls('agent', 'start').length, 2, 'the scout and the planner, from before the plan')
 })
 
 test('a learned command in config lets the team start', async t => {

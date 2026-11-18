@@ -5,14 +5,17 @@ import { execFile } from 'node:child_process'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { promisify } from 'node:util'
-import { DEFAULTS, ROLES } from '../src/config.mjs'
+import { DEFAULTS } from '../src/config.mjs'
+import { AGENT_TYPES, hasTeam, LEGACY_TEAM, teamOf, typeOf } from '../src/agents.mjs'
+import { awaitingApproval, notReady, phasesOf, readWorkflowSnapshot, runEnded } from '../src/workflow.mjs'
 import { loadProjectConfig } from '../src/memory.mjs'
 import { enkiHome, listTasks, readEvents } from '../src/state.mjs'
 import { git, goalOf } from '../src/worktrees.mjs'
 
 const run = promisify(execFile)
 
-export const AGENT_ROLES = ['orchestrator', ...ROLES]
+// Tasks from before workflows ran these five, never a planner.
+export const AGENT_ROLES = ['orchestrator', ...LEGACY_TEAM]
 export const ROLE_LABELS = { orchestrator: 'Orchestrator', scout: 'Scout', coder: 'Coder', tester: 'Tester', qa: 'QA', reviewer: 'Reviewer' }
 
 /** herdr's live agents, or null when herdr can't be reached. */
@@ -68,12 +71,96 @@ function finishedAt(events) {
 
 const byName = agents => new Map((agents ?? []).filter(agent => agent.name).map(agent => [agent.name, agent]))
 
+/**
+ * How the page labels and colors each of a task's steps. A step named after its role is the role
+ * ("Coder"); another step shows both ("Coder: frontend"), so two coders can be told apart.
+ */
+function stepStyles(task) {
+  const styles = { orchestrator: { label: 'Orchestrator', role: 'orchestrator', color: null, pattern: null } }
+  for (const [id, entry] of Object.entries(teamOf(task))) {
+    styles[id] = { label: id === entry.role ? entry.name : `${entry.name}: ${id}`, name: entry.name, role: entry.role, color: entry.color ?? null, pattern: entry.pattern ?? null }
+  }
+  return styles
+}
+
+/** The same, by agent type: the project's chart counts each type's tokens, whichever agents ran. */
+function typeStyles(task) {
+  const styles = { orchestrator: { label: 'Orchestrator', role: 'orchestrator', color: null, pattern: null } }
+  for (const entry of Object.values(teamOf(task))) {
+    const type = typeOf(entry)
+    styles[type] = { label: AGENT_TYPES[type].name, role: type, color: AGENT_TYPES[type].color, pattern: AGENT_TYPES[type].pattern }
+  }
+  return styles
+}
+
+const labelOf = (styles, id) => styles[id]?.label ?? ROLE_LABELS[id] ?? id
+
+/** Steps the orchestrator has to deal with, and those only the user can decide. */
+function handedOff(task) {
+  return Object.entries(task.run?.steps ?? {}).filter(([, step]) => step.status === 'handed-off')
+}
+
+/** The workflow and where its run is, for the graph on the task view. */
+function workflowView(task, styles, cards = []) {
+  if (!task.run) return null
+  let workflow
+  try {
+    workflow = readWorkflowSnapshot(task.taskDir)
+  } catch {
+    return null
+  }
+  const steps = task.run.steps
+  const { before } = phasesOf(workflow)
+  const BUILTIN_LABELS = { start: 'Start', approval: 'Approval', end: 'End', verify: 'Tests' }
+  // Start has always passed the request on; Approval waits for the user; End is reached or not.
+  const statusOf = node => {
+    if (node.kind === 'start') return 'done'
+    if (node.kind === 'end') return task.run.endReached ? 'done' : 'idle'
+    if (node.kind === 'approval') return awaitingApproval(task.run) ? 'waiting' : task.approved ? 'done' : 'idle'
+    return steps[node.id]?.status ?? 'idle'
+  }
+  return {
+    id: workflow.id,
+    name: workflow.name ?? workflow.id,
+    layout: workflow.layout ?? null,
+    routes: workflow.routes ?? null,
+    nodes: workflow.nodes.map(node => {
+      const step = steps[node.id]
+      return {
+        id: node.id,
+        kind: node.kind ?? null,
+        agent: node.agent ?? null,
+        label: node.kind ? (BUILTIN_LABELS[node.kind] ?? node.kind) : labelOf(styles, node.id),
+        phase: node.kind && node.kind !== 'verify' ? null : before.has(node.id) ? 'before' : 'after',
+        status: statusOf(node),
+        ready: step && !node.kind?.match(/^(approval)$/) ? !notReady(task.run, workflow, node.id) : false,
+        visits: step?.visits ?? 0,
+        outcome: step?.outcome ?? null,
+        reason: step?.reason ?? null,
+        handoffs: step?.handoffs ?? 0,
+        outcomes: node.kind ? null : (teamOf(task)[node.id]?.outcomes ?? []).map(outcome => outcome.id),
+        // The agent behind an agent step: what it runs on, and how full its context is.
+        agent: agentInfo(cards.find(card => card.role === node.id)),
+      }
+    }),
+    edges: workflow.edges.map(edge => ({ from: edge.from, on: edge.on, to: Array.isArray(edge.to) ? edge.to : [edge.to], max: edge.max ?? null, taken: task.run.edges[`${edge.from}:${edge.on}`] ?? 0 })),
+    endReached: task.run.endReached,
+    ended: runEnded(task.run),
+    orchestrator: agentInfo(cards.find(card => card.role === 'orchestrator')),
+  }
+}
+
+const agentInfo = card => (card ? { state: card.state, model: card.model, effort: card.effort ?? null, context: card.context, contextWindow: card.contextWindow } : null)
+
 /** One task, short: for lists. */
 export function taskSummary(task, events, live) {
   const abandoned = events.some(event => event.type === 'task.abandoned')
   const done = task.phase === 'done'
   const names = byName(live)
-  const waiting = !done && Object.values(task.agents ?? {}).some(agent => names.get(agent.name)?.agent_status === 'blocked')
+  // The user has to act: a worker waits on a prompt, or a loop reached its limit and only they can go on.
+  const waiting =
+    !done &&
+    (Object.values(task.agents ?? {}).some(agent => names.get(agent.name)?.agent_status === 'blocked') || handedOff(task).some(([, step]) => step.reason?.startsWith('limit')))
   const status = done ? (abandoned ? 'abandoned' : 'done') : waiting ? 'needs-you' : 'running'
   const end = done ? finishedAt(events) : null
   const goal = requirementsGoal(task)
@@ -115,11 +202,14 @@ export function windowFor(model, context = 0) {
   return context > size ? 1000000 : size
 }
 
-function agentCards(task, events, live, tokens, config) {
+function agentCards(task, events, live, tokens, config, styles) {
   const names = byName(live)
   const activity = readLines(join(task.taskDir, 'activity.jsonl'))
   const done = task.phase === 'done'
-  const roles = AGENT_ROLES.filter(role => role !== 'qa' || task.qa !== false)
+  const team = teamOf(task)
+  // The orchestrator, then the task's agent steps: those its workflow runs, and any that already ran.
+  const steps = Object.keys(team).filter(id => !task.run || task.run.steps[id] || task.agents?.[id])
+  const roles = task.run || hasTeam(task) ? ['orchestrator', ...steps] : AGENT_ROLES.filter(role => role !== 'qa' || task.qa !== false)
   return roles.map(role => {
     const known = role === 'orchestrator' ? null : task.agents?.[role]
     const herdr = role === 'orchestrator' ? (live ?? []).find(agent => agent.pane_id === task.orchestratorPane) : known && names.get(known.name)
@@ -138,10 +228,11 @@ function agentCards(task, events, live, tokens, config) {
     const step = task.steps?.find(item => item.n === stepN) ?? null
     return {
       role,
-      label: ROLE_LABELS[role],
+      label: labelOf(styles, role),
       name: herdr?.name ?? known?.name ?? null,
       state,
-      model: latest?.model ?? (role === 'orchestrator' ? null : config?.team?.[role]?.model ?? DEFAULTS.team[role]?.model ?? null),
+      model: latest?.model ?? (role === 'orchestrator' ? null : team[role]?.stepModel ?? team[role]?.model ?? null),
+      effort: role === 'orchestrator' ? null : team[role]?.stepEffort ?? team[role]?.effort ?? 'high',
       step: step ? { n: step.n, text: step.text, status: step.status } : null,
       calls,
       spent,
@@ -154,10 +245,22 @@ function agentCards(task, events, live, tokens, config) {
 const STEP_WORD = { todo: 'to do', active: 'in progress', done: 'done', failed: 'failed' }
 
 /** A sentence for each event worth showing. Agent-written text stays plain text. */
-function feedLine(event) {
+function feedLine(event, styles) {
   const d = event.data ?? {}
-  const who = ROLE_LABELS[d.role] ?? 'Orchestrator'
+  const label = id => labelOf(styles, id)
   switch (event.type) {
+    case 'step.outcome':
+      if (d.intake) return null
+      if (d.step === 'approval') return ['orchestrator', d.outcome === 'approved' ? 'the user approved the plan' : 'the user asked for changes to the plan']
+      if (d.by === 'user') return [d.step, `goes on as "${d.outcome}", the user's decision`]
+      if (d.to?.[0] === 'approval') return [d.step, 'wrote the plan: it waits for the user\'s approval']
+      return [d.step, d.to?.[0] === 'orchestrator' ? `reported "${d.outcome}"` : `reported "${d.outcome}" → ${d.to.map(target => (target === 'end' ? 'the end' : label(target))).join(', ')}`]
+    case 'step.handed_off':
+      return [d.step, d.stop ? 'was handed to the orchestrator too many times: the task stops here' : `went to the orchestrator (${d.reason})`]
+    case 'step.resumed':
+      return ['orchestrator', `sent ${label(d.step)} back to work${d.note ? `: ${d.note}` : ''}`]
+    case 'edge.limit':
+      return [d.step, 'reached its loop limit: the user decides how to go on']
     case 'task.created':
       return ['orchestrator', 'started the task']
     case 'plan.approved':
@@ -171,9 +274,9 @@ function feedLine(event) {
     case 'agent.finished':
       return [d.role, 'reported back']
     case 'agent.blocked':
-      return [d.role, 'is waiting for an answer']
+      return [d.role, 'is waiting on a prompt']
     case 'agent.answered':
-      return ['orchestrator', `answered ${ROLE_LABELS[d.role] ?? d.role}'s prompt: ${d.label}`]
+      return ['orchestrator', `answered ${label(d.role)}'s prompt: ${d.label}`]
     case 'agent.timeout':
       return [d.role, 'took longer than its time limit']
     case 'step.status':
@@ -199,11 +302,11 @@ function feedLine(event) {
   }
 }
 
-function feed(events) {
+function feed(events, styles) {
   return events
     .flatMap(event => {
-      const line = feedLine(event)
-      return line ? [{ at: event.t, role: line[0] ?? 'orchestrator', label: ROLE_LABELS[line[0]] ?? 'Orchestrator', text: line[1] }] : []
+      const line = feedLine(event, styles)
+      return line ? [{ at: event.t, role: line[0] ?? 'orchestrator', label: labelOf(styles, line[0] ?? 'orchestrator'), text: line[1] }] : []
     })
     .reverse()
     .slice(0, 60)
@@ -212,7 +315,7 @@ function feed(events) {
 function alerts(task, events, cards) {
   const list = []
   for (const card of cards) {
-    if (card.state === 'needs-you') list.push({ kind: 'warning', word: 'Needs you:', text: `${card.label} is waiting for an answer in its pane.` })
+    if (card.state === 'needs-you') list.push({ kind: 'warning', word: 'Needs you:', text: `${card.label} is waiting on a prompt in its pane.` })
     if (card.state === 'error') list.push({ kind: 'danger', word: 'Error:', text: `${card.label} is no longer running, but the task is still open.` })
   }
   const verify = task.verify
@@ -220,6 +323,12 @@ function alerts(task, events, cards) {
     list.push({ kind: 'danger', word: 'Error:', text: `Tests failed in round ${task.round}.` })
   }
   if (events.some(event => event.type === 'task.round_limit')) list.push({ kind: 'danger', word: 'Error:', text: 'The fix round limit was reached.' })
+  for (const [id, step] of handedOff(task)) {
+    const who = cards.find(card => card.role === id)?.label ?? id
+    if (step.reason?.startsWith('limit')) list.push({ kind: 'warning', word: 'Needs you:', text: `${who} reached a loop limit. Only you can decide how to go on: tell the orchestrator.` })
+    else list.push({ kind: 'warning', word: 'With the orchestrator:', text: `${who} handed its work over (${step.reason}).` })
+  }
+  if (task.phase !== 'done' && awaitingApproval(task.run)) list.push({ kind: 'warning', word: 'Needs you:', text: 'The plan is ready for your approval, in the orchestrator’s terminal.' })
   const lastCommitFailure = events.findLast(event => event.type === 'worktree.commit_failed')
   if (lastCommitFailure && task.phase !== 'done') list.push({ kind: 'danger', word: 'Error:', text: 'The final commit failed. A git hook may have refused it.' })
   return list
@@ -233,7 +342,18 @@ function shownStatus(step, task, events) {
   if (step.status === 'done' || step.status === 'failed') return step.status
   if (step.owner === 'scout' && events.some(event => event.type === 'agent.finished' && event.data.role === 'scout')) return 'done'
   if (step.owner === 'orchestrator' && task.phase === 'done' && !events.some(event => event.type === 'task.abandoned')) return 'done'
+  // A test run's own step, from before enki moved those itself: done if that run last passed.
+  if (task.run?.steps?.[step.owner]?.outcome === 'pass' && readWorkflowNode(task, step.owner)?.kind === 'verify') return 'done'
   return step.status
+}
+
+/** One step of a task's own copy of its workflow, or null. */
+function readWorkflowNode(task, id) {
+  try {
+    return readWorkflowSnapshot(task.taskDir).nodes.find(node => node.id === id) ?? null
+  } catch {
+    return null
+  }
 }
 
 function readTask(root, id) {
@@ -251,14 +371,17 @@ export function taskDetail(project, taskId, live, tokens) {
   } catch {
     // An invalid config still shows the task, without the configured models.
   }
-  const cards = agentCards(task, events, live, tokens, config)
-  const steps = (task.steps ?? []).map(step => ({ ...step, status: shownStatus(step, task, events), label: ROLE_LABELS[step.owner] }))
+  const styles = stepStyles(task)
+  const cards = agentCards(task, events, live, tokens, config, styles)
+  const steps = (task.steps ?? []).map(step => ({ ...step, status: shownStatus(step, task, events), label: labelOf(styles, step.owner) }))
   return {
     ...taskSummary(task, events, live),
     project: { id: project.id, name: project.name },
     agents: cards,
+    roles: styles,
+    workflow: workflowView(task, styles, cards),
     steps,
-    feed: feed(events),
+    feed: feed(events, styles),
     alerts: alerts(task, events, cards),
     stats: {
       active: cards.filter(card => card.state === 'running').length,
@@ -290,7 +413,8 @@ export function projectDetail(project, live, tokens) {
   const withEvents = tasks.map(task => ({ task, events: readEvents(task.taskDir) }))
   const sessionsOf = ({ task, events }) => [
     ...orchestratorSessions(events, task, live).map(session => ['orchestrator', session]),
-    ...Object.entries(task.agents ?? {}).filter(([, agent]) => agent.session).map(([role, agent]) => [role, agent.session]),
+    // By agent type, not step: a step's id can mean another agent in another task.
+    ...Object.entries(task.agents ?? {}).filter(([, agent]) => agent.session).map(([step, agent]) => [teamOf(task)[step] ? typeOf(teamOf(task)[step]) : step, agent.session]),
   ]
   const summaries = withEvents
     .map(item => ({ ...taskSummary(item.task, item.events, live), spent: sessionsOf(item).reduce((sum, [, session]) => sum + (tokens.session(session)?.spent ?? 0), 0) }))
@@ -343,6 +467,8 @@ export function projectDetail(project, live, tokens) {
     agentsWorking,
     heatmap,
     tokensByDay,
+    // Every agent type any task used, for the chart's colors and labels.
+    roles: Object.assign({}, ...withEvents.map(({ task }) => typeStyles(task))),
     repos: repoBranches(project),
   }
 }

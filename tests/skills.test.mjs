@@ -20,7 +20,8 @@ function fakeClaude(project, plugins) {
 
 const personal = project => join(project.env.HOME, '.claude/skills')
 const projectSkills = project => join(project.root, '.claude/skills')
-const team = (coder, extra = {}) => ({ team: { coder: { skills: coder }, ...extra } })
+/** The coder's step gets these skills, through the project's own workflow. */
+const team = (coder, extra = {}) => ({ steps: { coder: { skills: coder }, ...extra } })
 const launch = (project, name) => project.herdr.calls('agent', 'start', name)[0]
 const role = (project, name) => readFileSync(join(project.taskDir('demo'), `role-${name}.md`), 'utf8')
 
@@ -107,6 +108,20 @@ test('plugin skills load by prefix, from where the plugin really reads', () => {
   assert.match(role(project, 'coder'), /A one-skill plugin/)
 })
 
+test('a plugin\'s nested skills, listed in its plugin.json, are found and load', () => {
+  const project = makeProject(team(['matt:grilling']))
+  const folder = join(project.base, 'matt-src')
+  skill(join(folder, 'skills', 'productivity'), 'grilling', 'Grill the user.')
+  mkdirSync(join(folder, '.claude-plugin'))
+  writeFileSync(join(folder, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'matt', skills: ['./skills/productivity/grilling'] }))
+  const env = fakeClaude(project, [{ id: 'matt@market', enabled: true, installPath: folder }])
+  assert.match(project.enki(['skills', '--available'], env).out, /matt:grilling/)
+  assert.equal(project.enki(['task', 'new', 'demo'], env).code, 0)
+  project.approve()
+  assert.equal(project.enki(['team', 'start'], env).code, 0)
+  assert.match(role(project, 'coder'), /Grill the user/)
+})
+
 test('a disabled plugin\'s skill is not found', () => {
   const project = makeProject(team(['off:thing']))
   const folder = join(project.base, 'off-src')
@@ -124,7 +139,7 @@ test('a missing skill stops the task before any tab opens, and names the role', 
   const project = makeProject(team(['nope']))
   const result = project.enki(['task', 'new', 'demo'])
   assert.notEqual(result.code, 0)
-  assert.match(result.err, /team\.coder: Skill "nope" wasn't found/)
+  assert.match(result.err, /coder: Skill "nope" wasn't found/)
   assert.match(result.err, /enki skills --available/)
   assert.ok(!existsSync(join(project.base, 'herdr.json')), 'herdr was never called')
 })
@@ -140,21 +155,20 @@ test('a skill removed after the task began stops that worker, instead of startin
   assert.equal(project.herdr.calls('agent', 'start', 'coder-demo').length, 0)
 })
 
-test('a config change reaches workers started after it', () => {
-  const project = makeProject()
+test('the old team setting is ignored, with a warning that says where skills go now', () => {
+  const project = makeProject({ team: { coder: { skills: ['tidy'] } } })
   skill(personal(project), 'tidy', 'Late addition.')
+  const validated = project.enki(['validate'])
+  assert.equal(validated.code, 0, validated.err)
+  assert.match(validated.out, /warning: team is no longer used: .*Agents page.*workflow's steps/)
   project.enki(['task', 'new', 'demo'])
   project.approve()
-  const path = join(project.root, '.enki/config.json')
-  const config = JSON.parse(readFileSync(path, 'utf8'))
-  config.team = { coder: { skills: ['tidy'] } }
-  project.write(path, JSON.stringify(config))
   assert.equal(project.enki(['team', 'start']).code, 0)
-  assert.match(role(project, 'coder'), /Late addition/)
+  assert.doesNotMatch(role(project, 'coder'), /Late addition/)
 })
 
 test('skills sit alongside model settings', () => {
-  const project = started({ team: { coder: { model: 'custom', skills: [] } } })
+  const project = started({ steps: { coder: { model: 'custom' } } })
   const args = launch(project, 'coder-demo')
   assert.equal(args[args.indexOf('--model') + 1], 'custom')
   assert.equal(args[args.indexOf('--effort') + 1], 'high')
@@ -202,12 +216,15 @@ test('the orchestrator keeps its skills, because only workers get the flag', () 
   assert.match(context, /enki:task/)
 })
 
-test('skill names are validated', async () => {
-  const { validateConfig, ConfigError } = await import('../src/config.mjs')
-  for (const team of [{ coder: { skills: 'tidy' } }, { coder: { skills: ['bad name'] } }, { coder: { skills: ['a:b:c'] } }, { coder: { skils: [] } }, { designer: { skills: [] } }]) {
-    assert.throws(() => validateConfig({ team }), ConfigError, JSON.stringify(team))
-  }
-  validateConfig({ team: { qa: { skills: ['tidy', 'design:ux-copy', 'a.b_c-d'] } } })
+test('skill names on a step are checked with the workflow', async () => {
+  const { workflowProblems, loadWorkflows } = await import('../src/workflow.mjs')
+  const { builtinRoles } = await import('../src/agents.mjs')
+  const { source, path, ...full } = loadWorkflows(null).get('full')
+  const withSkills = skills => ({ ...full, nodes: full.nodes.map(node => (node.id === 'coder' ? { ...node, skills } : node)) })
+  for (const skills of ['tidy', ['bad name'], ['a:b:c']]) assert.ok(workflowProblems(withSkills(skills), builtinRoles()).some(problem => /skills/.test(problem)), JSON.stringify(skills))
+  assert.deepEqual(workflowProblems(withSkills(['tidy', 'design:ux-copy', 'a.b_c-d']), builtinRoles()), [])
+  const onVerify = { ...full, nodes: full.nodes.map(node => (node.id === 'verify' ? { ...node, skills: ['tidy'] } : node)) }
+  assert.ok(workflowProblems(onVerify, builtinRoles()).some(problem => /only an agent step has skills/.test(problem)))
 })
 
 test('parseSkill handles files with and without frontmatter', () => {

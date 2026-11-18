@@ -119,7 +119,7 @@ export async function ensureDashboard({ wait = true } = {}) {
 /** Starts it without waiting: for hooks, which mustn't slow Claude down. */
 export function ensureDashboardInBackground(enkiBin) {
   if (dashboardDisabled()) return
-  const child = spawn(process.execPath, [enkiBin, 'dashboard', '--quiet'], { detached: true, stdio: 'ignore', env: { ...process.env, ENKI_ROLE: '' } })
+  const child = spawn(process.execPath, [enkiBin, 'dashboard', '--quiet'], { detached: true, stdio: 'ignore', env: { ...process.env, ENKI_ROLE: '', ENKI_STEP: '' } })
   child.unref()
 }
 

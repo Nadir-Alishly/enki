@@ -1,0 +1,24 @@
+{
+  "id": "scout",
+  "name": "Scout",
+  "type": "scout",
+  "capabilities": {
+    "write": "none",
+    "blind": false,
+    "browser": false,
+    "server": false
+  },
+  "outcomes": [
+    {
+      "id": "done",
+      "description": "The report is written: what the plan needs to know about the code"
+    },
+    {
+      "id": "blocked",
+      "description": "Couldn't explore: the reason is in the report"
+    }
+  ],
+  "model": "claude-haiku-5-5",
+  "effort": "high",
+  "timeout": 900000
+}
