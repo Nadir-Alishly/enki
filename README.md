@@ -1,8 +1,31 @@
-# Enki
+<p align="center"><img src=".claude-plugin/icon.png" width="96" alt=""></p>
 
-Enki turns a Claude Code session into a software development orchestrator. The session stops writing code itself. It passes your request to a planner, gets your approval on the plan, and runs a team of Claude agents in visible [herdr](https://herdr.dev) panes. Enki's own team is a scout, a planner, a coder, a tester, QA and a reviewer, and you can build your own: [agents and workflows](#agents-and-workflows) are yours to define, share and edit in the dashboard.
+<h1 align="center">Enki</h1>
 
-The process is enforced by a CLI and hooks, not left to the model's memory. Nothing that writes starts until you approve the plan, each agent can only write what it is allowed to, every step runs only when its workflow says so, and every loop has a limit.
+<p align="center">Enki turns Claude Code into a team lead: you describe a change and approve a plan, and a team of Claude agents explores, codes, tests, clicks through and reviews it in its own git worktree.<br>Hooks and a CLI enforce the process, not the model's memory, so nothing writes before you approve, each agent writes only what it may, and every loop has a limit.</p>
+
+<p align="center"><img src="docs/images/dashboard-task.png" alt="Enki's dashboard showing a finished task: its workflow from Start through scout, planner, approval, coder, tester, QA, tests and reviewer to End, with each agent's model and context use"></p>
+
+## Install
+
+You need Claude Code 2.1.318 or newer, [herdr](https://herdr.dev) and Node 22 or newer. Install at user scope, so workers started in repo subfolders load the plugin too:
+
+```
+/plugin marketplace add Nadir-Alishly/enki
+/plugin install enki@enki-plugins
+```
+
+Then, in your project, inside a herdr pane:
+
+```
+/enki:init
+```
+
+Start a new session afterwards. It runs as the orchestrator: name a task, describe the change, and it begins. Enki does nothing in projects without `.enki/config.json`. For QA's browser, run `enki playwright install` once (see [Browser testing](#browser-testing)).
+
+## What happens on a task
+
+The orchestrator never writes code. It passes your request on and runs the team in visible herdr panes:
 
 ```
 ┌──────────┬──────────┬──────────┐
@@ -12,35 +35,35 @@ The process is enforced by a CLI and hooks, not left to the model's memory. Noth
 └──────────┴──────────┴──────────┘
 ```
 
-## What happens on a task
-
 With enki's **Full** workflow, the default:
 
-1. **Request.** You describe the change. The orchestrator writes down your words and passes them on: it carries messages between you and the team, and never plans or designs itself.
+1. **Request.** You name the task and describe the change. The orchestrator writes down your words and passes them on: it carries messages between you and the team, and never plans or designs itself.
 2. **Scout and planner.** The scout explores the code. The planner writes the plan from your request and the scout's findings. Questions only you can answer come to you through the orchestrator, and your answers go back to the planner.
 3. **Approval.** The orchestrator shows you the planner's plan, word for word, in plan mode: the goal, sub-goals, acceptance criteria and steps. Approve it, or ask for changes, which go back to the planner. Nothing changes before you approve.
 4. **Baseline.** `enki verify` records the current test results, so existing failures aren't blamed on the change.
-5. **Tests and code, in parallel.** The tester writes tests from the requirements while the coder implements.
+5. **Tests and code, in parallel.** The tester writes tests from the requirements, without seeing the code, while the coder implements.
 6. **Verify and manual checks, in parallel.** Enki runs the tests itself, with no agent and no tokens, while QA starts the server and uses the software in a browser.
 7. **Review.** The reviewer reads the diff once tests pass.
 8. **Loops.** Failing tests, QA's bugs and the reviewer's changes go back to the coder, each at most 3 times. Past that, only you decide how to go on.
 9. **Report.** Repo notes are updated, and you get a report with a scored retrospective on how the task was run.
 
-A plan can pick another workflow, such as **Quick fix** (no scout: the planner looks at the code itself, then the coder, tests and review) or **Research** (read-only), or one of your own.
+A plan can pick another workflow, such as **Quick fix** (no scout: the planner looks at the code itself, then the coder, tests and review) or **Research** (read-only), or one of your own: [agents and workflows](#agents-and-workflows) are yours to define, share and edit in the dashboard's studio.
 
-Agents never commit. Each task works in its own git worktree, and when it finishes, enki commits the work to a branch named after the task. You review the branch and merge it yourself.
+<p align="center"><img src="docs/images/studio.png" alt="The workflow studio showing enki's Full workflow as a graph of steps wired by their outcomes"></p>
+
+Agents never commit. Each task works in its own git worktree, and when it finishes, enki commits the work to the task's branch. You review it, push it and merge it yourself.
 
 ## Parallel tasks
 
 Every task gets its own git worktree, branch, port and, if the plan says so, database, so several tasks can run in the same repo at once.
 
-- **Starting:** you name each task, and the name is its branch: `dark-mode`, or with folders, like `feature/dark-mode`. `enki task new feature/dark-mode` creates the branch `feature/dark-mode` from the project's working branch, `baseBranch` (`dev` unless you change it in Settings), whatever your main tree has checked out, and a worktree under `.enki/worktrees/`. It refuses if the working branch is missing, is behind its upstream as of your last fetch (enki never fetches), or has uncommitted changes in your main tree.
+- **Starting:** you name each task, and the name is its branch: `dark-mode`, or with folders, like `feature/dark-mode`. `enki task new feature/dark-mode` creates the branch `feature/dark-mode` from the project's working branch, `baseBranch` (`dev` unless you change it in Settings), whatever your main tree has checked out, and a worktree under `.enki/worktrees/`. It refuses if the working branch is missing, is behind its upstream as of your last fetch (enki never fetches), or has uncommitted changes while your main tree is on it.
 - **Continuing a task:** when reviewers want changes to a task's pull request, `enki task new dark-mode-review --on dark-mode` works on the branch `dark-mode` itself, in a fresh worktree, and commits on top of it. Push it to update the PR. `--on` takes a finished task's name or any local branch. The new task has its own folder, port and report, and its briefs point to the earlier task's requirements, plan and report. The branch must not be checked out anywhere else. A continued branch is never deleted, even if nothing changed, and `--abandon` puts the WIP on a branch named after the new task, leaving the PR alone.
 - **What git doesn't carry:** enki copies the gitignored files in `worktree.copy`, such as `.env*`, and links the folders in `worktree.link`, such as `node_modules`. If the approved plan has `Scope: deps`, the task gets its own install with `worktree.install`.
 - **Ports:** each task's server gets a free port from `ports`, through `{port}` in `devServer.start` and the `PORT` variable. A machine-wide registry stops two tasks picking the same one.
 - **Per-task settings:** `worktree.env` sets values in the copied env files and the task's processes. It can use `{port}`, `{port:<repo>}` and `{task}`.
 - **Databases:** with a `database` section, each plan says `Database: copy`, `shared` or `none`. `copy` runs your `copy` command at team start and `drop` at the end. `none` blanks the database env values, so nothing reaches the real database by accident. A plan without the line gets `database.default`, `copy` unless you set it. `"enabled": false` turns copying off but keeps the commands: plans then use the shared database, or none.
-- **Finishing:** enki removes its copies and links, commits everything else to the task's branch under your git identity, with your git hooks, and removes the worktree. The output gives the branch and `git diff <base>...<slug>` to review it, or for a continued task, the diff of its own commits. If a hook refuses the commit, the task stays open. An empty task's branch is deleted, and `--abandon` commits the work as WIP.
+- **Finishing:** enki removes its copies and links, commits everything else to the task's branch under your git identity, with your git hooks, and removes the worktree. The output gives the branch and `git diff <base>...<branch>` to review it, or for a continued task, the diff of its own commits. If a hook refuses the commit, the task stays open. An empty task's branch is deleted, and `--abandon` commits the work as WIP.
 
 ```json
 {
@@ -70,7 +93,6 @@ Everything goes into `~/.enki/playwright`, never into your projects. Enki uses a
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `memory` | `repo` | `repo` or `private`: see Memory |
 | `browser.driver` | `playwright` | `playwright`, `chrome` (Claude in Chrome, one task at a time) or `none` |
 | `browser.headless` | `true` | `false` opens a visible window |
 | `browser.executable` | | Absolute path to a Chrome or Chromium to use |
@@ -108,22 +130,20 @@ It works from any folder. Any enki session or new task also starts it in the bac
 While an orchestrator has a task open, a band above its prompt shows the task and its phase, with a **Go to dashboard** button that opens the task's page. Collapse it with its `[-]`. Run from an orchestrator's pane, `enki dashboard --open` also opens that task's page, and `enki dashboard link` prints what the band shows. On KDE Plasma, where Wayland won't let a background process hand the browser the focus, enki asks KWin (through a small script over D-Bus) to bring the dashboard's window forward, switching virtual desktops if needed.
 
 - **Project view:** a year of finished tasks as a heatmap, tokens spent by agent over 7, 30 or 90 days, and every task with its status, duration and tokens.
-- **Task view:** the task's workflow by name, drawn as in the studio and fitted to the page, from Start through Approval to End. It is the team view too: each agent step shows its state, model, effort and how full its context is, and the orchestrator sits top left with its own. A step that came back to the orchestrator wears an orange "With you" badge, and ↩ marks the outcomes that go back to it. Then context by agent, the plan with each step's status, any alert that needs you, and the activity feed. Tasks from before workflows show their agent cards instead. Hover or click a step, a context total or a plan step's owner to pick that agent out everywhere on the page; Escape clears it.
+- **Task view:** the task's workflow by name, drawn as in the studio and fitted to the page, from Start through Approval to End. It is the team view too: each agent step shows its state, model, effort and how full its context is, and the orchestrator sits top left with its own. A step that came back to the orchestrator wears an orange "With you" badge, and ↩ marks the outcomes that go back to it. Then context by agent, the plan with each step's status, any alert that needs you, and the activity feed. Hover or click a step, a context total or a plan step's owner to pick that agent out everywhere on the page; Escape clears it.
 - **Workflows:** every workflow available to the project, with duplicate, export and import. Importing shows each new agent's permissions before anything is saved.
 - **Agents:** every agent, enki's own and your library's, with what each may do, its outcomes, what it runs on and which workflows use it. Make a new one from a template, duplicate one of enki's, export and import them. The editor sets the name and type; what enki enforces (what it may change, blind, browser, dev server, plans), with a warning for risky combinations; the outcomes, refusing a rename or removal a workflow still wires; the default model, effort, timeout and skills; and the instructions, with a preview. Enki's own agents open read-only, with a button to duplicate them.
-- **Studio:** each workflow opens on one screen. Drag around the canvas and zoom; drag agents in from the library on the left; drag steps to place them; drag from an outcome's port to a step to wire it, or onto empty canvas to create the step there. Lines run square: drag any segment to move it, double-click a segment to add a bend and a bend's handle to take it out, drag a line's end onto another block to send the outcome there, and remove a line with the × on it. The library has two tabs: agents, and built-in steps like Tests, which run without an agent. The inspector on the right sets each step's agent, its model, effort and extra skills for this workflow, any extra step it waits for and its hand-off limit, and each loop's limit, and offers everything dragging does from the keyboard. Both side panels open and close. A loop without a limit shows red, every change is checked by the same rules the CLI uses, and Save stays off until the workflow can run. Undo and redo with Ctrl+Z and Ctrl+Shift+Z. Enki's own workflows open read-only, with a button to duplicate them. On a phone the studio is for looking only.
-- **Project settings:** it edits the project's `.enki/config.json`: the default workflow, activation, worktrees, timeouts, the browser, the port range and database copying. Memory mode, repos and their test and dev server commands are shown but not editable. Changes apply to the next agent started. If the file changes elsewhere while you have unsaved edits, the page asks you to reload instead of overwriting it.
+- **Studio:** each workflow opens on one screen. Drag around the canvas and zoom; drag agents in from the library on the left; drag steps to place them; drag from an outcome's port to a step to wire it, or onto empty canvas to create the step there. Lines run square: drag any segment to move it, double-click a segment to add a bend and a bend's handle to take it out, drag a line's end onto another block to send the outcome there, and remove a line with the × on it. The library has two tabs: agents, and built-in steps like Tests, which run without an agent. The inspector on the right sets each step's agent, its model, effort and extra skills for this workflow, which steps it waits for, its hand-off limit, and each loop's limit, and offers everything dragging does from the keyboard. Both side panels open and close. A loop without a limit shows red, every change is checked by the same rules the CLI uses, and Save stays off until the workflow can run. Undo and redo with Ctrl+Z and Ctrl+Shift+Z. Enki's own workflows open read-only, with a button to duplicate them. On a phone the studio is for looking only.
+- **Project settings:** it edits the project's `.enki/config.json`: the default workflow, activation, worktrees and the working branch, timeouts, the browser, the port range and database copying. Memory mode, repos and their test and dev server commands are shown but not editable. Changes apply to the next agent started. If the file changes elsewhere while you have unsaved edits, the page asks you to reload instead of overwriting it.
 
 Agent states are herdr's own (Running, Idle, Done, Needs you), plus Stopped, and Error for an agent that vanished from an open task. They follow herdr within about 2 seconds. Plan steps come from the approved plan's **Steps** list: each `enki ask --step N` (or `--step 2,3,4`: one visit does all of them) marks its steps active. When the agent finishes they're done, or failed if its outcome went to the orchestrator instead (blocked, an error).
 
 How it works:
 
-- One server per computer, owned by no session. It listens only on `127.0.0.1`, refuses requests for any other host name and sends no CORS headers. Its only writes are a settings save and the Workflows page's copy, import and save, which it accepts only from its own page: the request must come from the dashboard's own origin, as JSON, with a token only that page can read. The project comes from enki's registry, never from the request, and only the fields on the page can change. It exits after 30 minutes with no open task and no open page.
+- One server per computer, owned by no session. It listens only on `127.0.0.1`, refuses requests for any other host name and sends no CORS headers. Its only writes are the settings, workflow and agent saves, copies, imports and deletes made on its pages, which it accepts only from its own page: the request must come from the dashboard's own origin, as JSON, with a token only that page can read. The project comes from enki's registry, never from the request, and only the fields on the page can change. It exits after 30 minutes with no open task and no open page.
 - It reads what enki already writes: the project registry in `~/.enki/projects.json`, each task's state, event log and activity log, and herdr's agent list. Tokens come from Claude Code's own session transcripts. A cache in `~/.enki/dashboard.db` saves rereading them, and can be deleted at any time.
 - `enki dashboard status` and `enki dashboard stop` check or stop it. After a plugin update, the next start replaces an older server.
 - `ENKI_DASHBOARD_PORT` picks another port. `ENKI_DASHBOARD=off` stops enki from starting it.
-
-Tasks started before the dashboard existed show their history, but not their tokens, steps or tool calls.
 
 ## Agents and workflows
 
@@ -151,7 +171,7 @@ An **agent** is what a workflow step runs. A **workflow** wires agents together 
 - **`browser` and `server`:** a browser, and `enki server`.
 - **`plans`:** it writes the plan (enki's planner), and nothing else.
 - **`outcomes`:** its own. The agent reports one with `enki report <outcome>` before it replies. Enki adds `error`, for an agent that finished without reporting, and `timeout`.
-- **`type`:** `scout`, `planner`, `coder`, `tester`, `qa` or `reviewer`. It sets the agent's colour and pattern, and the project's token chart counts by it. An agent without one gets a type from what it does; an old `color` or `pattern` is ignored.
+- **`type`:** `scout`, `planner`, `coder`, `tester`, `qa` or `reviewer`. It sets the agent's colour and pattern, and the project's token chart counts by it. An agent without one gets a type from what it does.
 
 Enki warns, without refusing, about risky combinations: a browser without the dev server, a blind agent that writes code.
 
@@ -173,7 +193,7 @@ Enki warns, without refusing, about risky combinations: a browser without the de
 - **Models and skills:** a step can set its own `model` and `effort`, which win over its agent's, and add `skills` to its agent's own. This is how a project tunes its agents, through its own workflow.
 - **Positions:** `layout` keeps where each step sits in the dashboard's studio, and `routes` where each line runs. Enki ignores both when running.
 - **Loops:** every loop needs a `max`. Past it, only you decide.
-- **Waiting:** a step starts only once every step that sends it work has done so, counting a loop's line (one with a `max`) as enough on its own. It also waits while any step before it is still working, so findings arrive together and nothing runs on code that's about to change. A `waitFor` in an older workflow is ignored.
+- **Waiting:** a step starts only once every step that sends it work has done so, counting a loop's line (one with a `max`) as enough on its own. It also waits while any step before it is still working, so findings arrive together and nothing runs on code that's about to change.
 - **Built-in steps:** `verify` (Tests in the dashboard) runs the project's test, lint and gate commands itself, with no agent and no tokens, and reports `pass` or `fail` from their exit codes.
 
 **What agents know about a workflow** comes from its graph alone. The planner's brief carries a summary enki writes from it: each step, what its agent may do, where each outcome goes, and what no step does (write tests, use a browser, review the work, fix failing tests). A plan that counts on work no step may do goes back to the planner before you see it: with no step that writes tests, it has to say `Tests: none`. The `description` is only for people choosing a workflow: agents never see it, and the task's own copy of the workflow leaves it out. A duplicate starts without one.
@@ -194,7 +214,7 @@ It warns, without refusing, about a test run whose `fail` goes nowhere (failing 
 - **Your library:** `~/.enki/library/workflows/`, for every project.
 - **The project:** `.enki/workflows/`.
 
-**Choosing:** the project's default is `"workflow"` in its config, `enki task new <slug> --workflow <id>` picks another, and the planner can switch with `Workflow: <id>` in its plan: the work so far stays, and what follows Approval comes from the new workflow. `Skip: <step>` drops steps, as `Tests: none` and `QA: none` do. Each task keeps a copy of its workflow and agents, so editing the library never changes a running task.
+**Choosing:** the project's default is `"workflow"` in its config, `enki task new <name> --workflow <id>` picks another, and the planner can switch with `Workflow: <id>` in its plan: the work so far stays, and what follows Approval comes from the new workflow. `Skip: <step>` drops steps, as `Tests: none` and `QA: none` do. Each task keeps a copy of its workflow and agents, so editing the library never changes a running task.
 
 ```
 enki workflow list                      enki workflow show <id>
@@ -210,11 +230,7 @@ enki agent import x.json --by user
 - **An agent's export** is the agent alone, with its instructions.
 - **An import** shows each new agent's permissions and saves only with your approval. Agents always go to your library. It never overwrites anything, and never replaces enki's own agents.
 
-Files from before agents were called agents still load: `role.json` and `SKILL.md`, `~/.enki/library/roles/`, workflow steps that say `"role"`, and exports with `roles`. Saving writes the new names. A project's old `.enki/roles/` folder isn't read anymore, and `enki validate` says so.
-
 The dashboard's **Workflows** page does the same, and opens each workflow in the studio.
-
-Workflows saved before Start and Approval existed are upgraded when enki reads them: Start leads to their old intake steps, a planner writes the plan, and Approval starts their old start steps.
 
 ## What enki runs, reads and sends
 
@@ -227,30 +243,6 @@ Enki has no telemetry and no server of its own. Everything below happens on your
 - **Your commands.** `enki verify` runs your configured test commands. Team start runs your dev server, install and database copy commands when the config and plan ask for them.
 - **Files outside your projects.** Enki writes to `~/.enki/`: the project registry, the port registry, the dashboard's cache and log, and the Playwright install. The dashboard reads Claude Code's transcripts in `~/.claude/projects/` to count tokens, and its model list in `~/.claude/cache/model-catalog/` for the settings page.
 - **Network.** `enki playwright install` downloads `@playwright/mcp` 0.0.83 from the npm registry, and Chromium only with `--browser`. The dashboard page loads the Geist font from Google Fonts. Enki checks your dev server on localhost. Nothing else leaves your computer through enki.
-
-## Requirements
-
-- Claude Code 2.1.318 or newer
-- [herdr](https://herdr.dev), with Claude running inside a herdr pane
-- Node 22 or newer
-- For browser testing, an installed Chrome or Chromium, or let enki download one (see below)
-
-## Install
-
-Install at user scope, so workers started in repo subfolders load the plugin too. Enki does nothing in projects without `.enki/config.json`.
-
-```
-/plugin marketplace add Nadir-Alishly/enki
-/plugin install enki@enki-plugins
-```
-
-Then, in your project, inside a herdr pane:
-
-```
-/enki:init
-```
-
-Start a new session afterwards. It runs as the orchestrator: describe a change and the task begins.
 
 ## Memory
 
@@ -303,7 +295,7 @@ Enki's policy applies in every mode, and a command the hook denies stays denied 
 |---|---|
 | `/enki:init` | Set up the current project |
 | `/enki:task <request>` | Start a task. In `auto` mode any change request does this |
-| `/enki:resume <slug>` | Continue a task after `/clear` or in a new session |
+| `/enki:resume <name>` | Continue a task after `/clear` or in a new session |
 | `/enki:status` | Show task state |
 
 The orchestrator drives the `enki` CLI, which is on the Bash `PATH` while the plugin is enabled. Run `enki help` to see it. You can run `enki dashboard` yourself, from any folder.
@@ -316,6 +308,9 @@ The orchestrator drives the `enki` CLI, which is on the Bash `PATH` while the pl
 |---|---|---|
 | `mode` | `auto` | `auto`: every session here is the orchestrator. `explicit`: only after `/enki:task` |
 | `repos[]` | | `path` (required), `name`, `test`, `lint`, `url`, `testGlobs`, `devServer`, `gate` |
+| `baseBranch` | `dev` | The branch new tasks fork from |
+| `worktrees` | `true` | `false` for a project that isn't in git: tasks share one tree |
+| `memory` | `repo` | `repo` or `private`: see [Memory](#memory) |
 | `workflow` | `full` | The workflow new tasks run. See [Agents and workflows](#agents-and-workflows) |
 | `permissionMode` | `auto` | Permission mode for workers |
 | `timeouts` | 15 to 30 minutes, 2 for server start | Milliseconds per step |
@@ -325,7 +320,7 @@ The orchestrator drives the `enki` CLI, which is on the Bash `PATH` while the pl
 Also in `.enki/`:
 
 - `playbook.md`: project rules, by role, passed to the workers
-- `notes/<repo>.md`: living knowledge about each repo
+- `memory/<repo>/`: each repo's notes, in private memory mode
 - `tasks/<date>-<slug>/`: plan, reports, `state.json` and `events.jsonl`. Gitignored by default
 
 A plan sets options with lines you approve: `Workflow: <id>` to run another workflow, `Skip: <step>` (or `Tests: none`, `QA: none`) to drop steps, and `Scope: deps`, `Scope: infra` or `Scope: git-init` to unlock extra permissions.
