@@ -21,6 +21,7 @@ function toDraft(values) {
     workflow: values.workflow,
     mode: values.mode,
     worktrees: values.worktrees,
+    baseBranch: values.baseBranch,
     timeouts: Object.fromEntries(Object.entries(values.timeouts).map(([key, value]) => [key, String(value)])),
     driver: values.browser.driver,
     headless: values.browser.headless,
@@ -48,6 +49,7 @@ function changesOf(draft, saved) {
   diff('workflow', draft.workflow, saved.workflow)
   diff('mode', draft.mode, saved.mode)
   diff('worktrees', draft.worktrees, saved.worktrees)
+  diff('baseBranch', draft.baseBranch.trim(), saved.baseBranch.trim())
   for (const [key] of TIMEOUTS) diff(`timeouts.${key}`, asNumber(draft.timeouts[key], DECIMAL), Number(saved.timeouts[key]))
   diff('browser.driver', draft.driver, saved.driver)
   diff('browser.headless', draft.headless, saved.headless)
@@ -69,6 +71,7 @@ function problemsOf(draft, changes, catalog) {
     const text = draft.timeouts[key]
     if (!DECIMAL.test(text) || Number(text) <= 0) errs[`timeouts.${key}`] = 'Enter minutes, more than 0.'
   }
+  if (!draft.baseBranch.trim()) errs.baseBranch = 'Enter a branch name, like dev.'
   const port = text => WHOLE.test(text) && Number(text) >= 1024 && Number(text) <= 65535
   if (!port(draft.portFrom)) errs['ports.from'] = 'Enter a whole number between 1024 and 65535.'
   if (!port(draft.portTo)) errs['ports.to'] = 'Enter a whole number between 1024 and 65535.'
@@ -337,6 +340,18 @@ export function createSettings({ h, svg, chip, getJson, onDirty, learnRoles = ()
           set: value => (d().worktrees = value),
           state: ctx => ({ on: d().worktrees, disabled: isPrivate && d().worktrees, text: ctx?.errs.worktrees }),
           help: () => (isPrivate ? 'Can’t be turned off while memory mode is private.' : 'Each task works in its own git worktree and branch.'),
+        }),
+        field(s, {
+          id: 'set-base',
+          label: 'Working branch',
+          err: 'baseBranch',
+          control: input(s, { id: 'set-base', mono: true, placeholder: 'dev', get: () => d().baseBranch, set: value => (d().baseBranch = value) }),
+          help: () => (d().worktrees ? 'Each new task branches off this, whatever your main tree has checked out.' : 'Used once Worktrees is on: each new task branches off it.'),
+          warn: () => {
+            const name = d().baseBranch.trim()
+            const missing = name ? ro.repos.filter(repo => !(repo.branches ?? []).includes(name)).map(repo => repo.name) : []
+            return missing.length > 0 ? `No branch ${name} in ${missing.join(', ')}, so a task there won’t start.` : null
+          },
         }),
       ),
     )

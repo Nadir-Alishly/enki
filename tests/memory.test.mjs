@@ -351,12 +351,36 @@ test('private mode: enki memory merge takes a task\'s memory by hand', () => {
 })
 
 test('private mode: a new code branch gets memory from memory\'s default, and says so', () => {
-  const p = project({ memory: 'private' })
+  const p = project({ memory: 'private', extra: { baseBranch: 'feature' } })
   git(p.repo('web'), 'checkout', '-q', '-b', 'feature')
   const result = p.enki(['task', 'new', 'demo'])
   assert.equal(result.code, 0, result.err)
   assert.ok(p.events('demo')[0].data.memory.some(line => /no branch "feature" yet, so it was started from "dev"/.test(line)))
   assert.match(readFileSync(join(taskRepo(p, 'demo').memoryDir, 'notes.md'), 'utf8'), /Original fact/)
+})
+
+for (const mode of ['repo', 'private']) {
+  test(`${mode} mode: a task continuing another starts from that task's memory`, () => {
+    const p = project({ memory: mode })
+    taskWithNote(p, 'demo', start(p, 'demo'), 'Learned in demo.')
+    finish(p, 'demo', { HERDR_PANE_ID: 'w1:a' })
+    const result = p.enki(['task', 'new', 'review', '--on', 'demo'], { HERDR_PANE_ID: 'w1:b' })
+    assert.equal(result.code, 0, result.err)
+    const repo = taskRepo(p, 'review')
+    const notes = mode === 'private' ? join(repo.memoryDir, 'notes.md') : join(repo.workdir, '.enki', 'notes.md')
+    assert.match(readFileSync(notes, 'utf8'), /Learned in demo\./)
+  })
+}
+
+test('private mode: continuing a task named with folders finds its memory, by its full name', () => {
+  const p = project({ memory: 'private' })
+  assert.equal(p.enki(['task', 'new', 'fix/demo'], { HERDR_PANE_ID: 'w1:a' }).code, 0)
+  taskWithNote(p, 'demo', { HERDR_PANE_ID: 'w1:a' }, 'Learned in fix/demo.')
+  finish(p, 'demo', { HERDR_PANE_ID: 'w1:a' })
+  const result = p.enki(['task', 'new', 'demo-review', '--on', 'fix/demo'], { HERDR_PANE_ID: 'w1:b' })
+  assert.equal(result.code, 0, result.err)
+  assert.equal(p.state('demo-review').continues.slug, 'demo')
+  assert.match(readFileSync(join(taskRepo(p, 'demo-review').memoryDir, 'notes.md'), 'utf8'), /Learned in fix\/demo\./)
 })
 
 test('private mode needs worktrees', async () => {

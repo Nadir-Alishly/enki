@@ -22,7 +22,7 @@ Enki's agents: **scout** (read-only, before the plan), **planner** (writes the p
 Use it for all team work, never herdr by hand.
 
 ```
-enki task new <slug>  enki team start  enki status  enki next  enki verify  enki phase <name>
+enki task new <name>  enki team start  enki status  enki next  enki verify  enki phase <name>
 enki ask <step> <brief> --step <n>[,<n>]  enki wait <step>  enki read <step>  enki answer <step> <option>
 enki resume <step> --note "..."  enki outcome <step> <outcome> --by user  enki resume <slug>
 enki outcome approval changes --by user --note "<the user's words>"

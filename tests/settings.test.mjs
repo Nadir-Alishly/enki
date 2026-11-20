@@ -68,6 +68,12 @@ test('env names are checked one by one', () => {
   assert.deepEqual(problems.map(item => item.path), ['database.env.1', 'database.env.2', 'database.env.3'])
 })
 
+test('the working branch defaults to dev, saves, and must be a branch name', () => {
+  assert.equal(editableValues({}).baseBranch, 'dev')
+  assert.equal(applyChanges({}, { baseBranch: 'main' }).baseBranch, 'main')
+  for (const bad of ['', 'two words', 'a..b', 7]) assert.equal(fails({}, { baseBranch: bad })[0].path, 'baseBranch', String(bad))
+})
+
 test('values are checked, and only the page’s fields can change', () => {
   assert.equal(fails({}, { 'timeouts.coder': 0 })[0].path, 'timeouts.coder')
   assert.equal(fails({}, { maxFixRounds: 1.5 })[0].path, 'maxFixRounds')

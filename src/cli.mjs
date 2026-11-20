@@ -24,7 +24,8 @@ import { loadSecrets, removeSecret, setSecret } from './secrets.mjs'
 const USAGE = `enki: orchestration for Claude Code on herdr
 
 Setup     enki doctor | enki init | enki validate | enki skills [--available]
-Task      enki task new <slug> [--repo <name>]... [--workflow <id>] | enki resume <slug> | enki status
+Task      enki task new <name> [--repo <name>]... [--workflow <id>] [--on <task|branch>]
+          enki resume <slug> | enki status
 Team      enki team start | enki start <step>
 Work      enki next | enki ask <step> <brief-file> [--step <n>[,<n>…]] [--report <file>] [--timeout <ms>]
           enki resume <step> [--note "..."] | enki outcome <step> <outcome> --by user [--note "..."]
@@ -85,6 +86,7 @@ const OPTIONS = {
   quiet: { type: 'boolean' },
   note: { type: 'string' },
   workflow: { type: 'string' },
+  on: { type: 'string' },
   to: { type: 'string' },
   out: { type: 'string' },
   help: { type: 'boolean', short: 'h' },
@@ -273,13 +275,15 @@ const commands = {
     console.log(lines.length > 0 ? lines.join('\n') : 'None found.')
   },
   async task(args, flags) {
-    if (args[0] !== 'new' || !args[1]) throw new EnkiError('Usage: enki task new <slug> [--repo <name>]... [--workflow <id>]', EXIT.usage)
-    const state = await task.newTask({ root: requireRoot(), slug: args[1], repoNames: flags.repo ?? [], workflow: flags.workflow ?? null })
+    if (args[0] !== 'new' || !args[1]) throw new EnkiError('Usage: enki task new <name> [--repo <name>]... [--workflow <id>] [--on <task|branch>]', EXIT.usage)
+    const state = await task.newTask({ root: requireRoot(), name: args[1], repoNames: flags.repo ?? [], workflow: flags.workflow ?? null, on: flags.on ?? null })
     const running = Object.values(state.agents).map(agent => agent.name)
     console.log(
       [
         `Task ${state.id} created, workflow ${state.workflow}. Running: ${running.join(', ') || 'nothing yet'}`,
         `Folder: ${state.taskDir}`,
+        ...state.worktrees.map(tree => (tree.continued ? `Continues branch ${tree.branch}, at ${tree.base.commit.slice(0, 7)}` : `Branch ${tree.branch}, from ${tree.base.branch}`)),
+        ...(state.continues?.slug ? [`Earlier task: ${state.continues.taskDir} (its requirements.md, approved plan and report are what's already there)`] : []),
         `Tab: ${state.herdr.tab}`,
         `Next: write the user's request to ${state.taskDir}/request.md in their own words, then: enki next`,
       ].join('\n'),

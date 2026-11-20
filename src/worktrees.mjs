@@ -33,32 +33,67 @@ function repositories(repos) {
   return groups
 }
 
-/** Everything that would stop a worktree, checked before anything is created. */
-export function checkRepositories({ root, repos, slug }) {
+const branchExists = (top, branch) => Boolean(git(top, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { allowFail: true }))
+
+/** Where `branch` is checked out, if anywhere: the main tree or another worktree. */
+function checkedOutAt(top, branch) {
+  const blocks = git(top, ['worktree', 'list', '--porcelain']).split('\n\n')
+  const block = blocks.find(item => item.split('\n').includes(`branch refs/heads/${branch}`))
+  return block ? block.split('\n')[0].replace(/^worktree /, '') : null
+}
+
+/** How many commits the branch's upstream has that it doesn't, as of the last fetch. */
+const behindBy = (top, branch) => Number(git(top, ['rev-list', '--count', `${branch}..${branch}@{upstream}`], { allowFail: true }) ?? 0)
+
+/**
+ * Everything that would stop a worktree, checked before anything is created. A task forks a new
+ * branch from `from` (the project's working branch), or, with `on`, works on that existing branch.
+ * Returns, for each repository, its repos and where its worktree starts.
+ */
+export function checkRepositories({ root, repos, branch, from, on = null }) {
   const groups = repositories(repos)
   const enkiDir = join(root, '.enki')
-  for (const top of groups.keys()) {
-    const name = groups.get(top).map(repo => repo.name).join(', ')
+  if (on && ![...groups.keys()].some(top => branchExists(top, on))) {
+    throw new WorktreeError(`No branch "${on}" in ${[...groups.values()].flat().map(repo => repo.name).join(', ')}.`)
+  }
+  const plan = new Map()
+  for (const [top, members] of groups) {
+    const name = members.map(repo => repo.name).join(', ')
     if (!git(top, ['rev-parse', '--verify', '--quiet', 'HEAD'], { allowFail: true })) {
       throw new WorktreeError(`${name} has no commits yet. Make a first commit, then start the task.`)
     }
-    const branch = git(top, ['branch', '--show-current'])
-    if (!branch) throw new WorktreeError(`${name} isn't on a branch (detached HEAD). Check out the branch the task should build on.`)
-    const dirty = git(top, ['status', '--porcelain', '--untracked-files=all'])
-      .split('\n')
-      .filter(Boolean)
-      .map(line => line.slice(3))
-      // .enki is enki's own, apart from a root repo's memory files, which the task would start without.
-      .filter(path => !(join(top, path).startsWith(enkiDir + sep) || join(top, path) === enkiDir) || ROOT_MEMORY.has(relative(root, join(top, path))))
-    if (dirty.length > 0) {
-      const shown = dirty.slice(0, 10).join(', ') + (dirty.length > 10 ? `, and ${dirty.length - 10} more` : '')
-      throw new WorktreeError(`${name} has uncommitted changes, and a task starts from the last commit. Commit or stash them first: ${shown}`)
+    // A repository the earlier task didn't change has no branch of it: it starts one, as a new task would.
+    const continued = Boolean(on) && branchExists(top, on)
+    const start = continued ? on : from
+    if (!branchExists(top, start)) {
+      throw new WorktreeError(`${name} has no branch "${start}", the branch tasks fork from. Create it, or set another working branch (baseBranch) in the project's Settings.`)
     }
-    if (git(top, ['rev-parse', '--verify', '--quiet', `refs/heads/${slug}`], { allowFail: true })) {
-      throw new WorktreeError(`A branch called "${slug}" already exists in ${name}. Pick another task name, or delete that branch.`)
+    const behind = behindBy(top, start)
+    if (behind > 0) {
+      throw new WorktreeError(`${name}: ${start}'s upstream has ${behind} commit(s) that ${start} doesn't, as of your last fetch. Update ${start} first (git fetch origin ${start}:${start}, or pull while on it), so the task builds on them.`)
     }
+    if (continued) {
+      const at = checkedOutAt(top, on)
+      if (at) throw new WorktreeError(`${name}: branch "${on}" is checked out in ${at}, and git allows a branch in one tree only. Switch that tree to another branch first.`)
+    } else if (git(top, ['branch', '--show-current']) === start) {
+      // Only the working branch's own uncommitted changes would be missing from the task.
+      const dirty = git(top, ['status', '--porcelain', '--untracked-files=all'])
+        .split('\n')
+        .filter(Boolean)
+        .map(line => line.slice(3))
+        // .enki is enki's own, apart from a root repo's memory files, which the task would start without.
+        .filter(path => !(join(top, path).startsWith(enkiDir + sep) || join(top, path) === enkiDir) || ROOT_MEMORY.has(relative(root, join(top, path))))
+      if (dirty.length > 0) {
+        const shown = dirty.slice(0, 10).join(', ') + (dirty.length > 10 ? `, and ${dirty.length - 10} more` : '')
+        throw new WorktreeError(`${name} has uncommitted changes on ${start}, and a task starts from its last commit. Commit or stash them first: ${shown}`)
+      }
+    }
+    if (branchExists(top, branch)) {
+      throw new WorktreeError(`A branch called "${branch}" already exists in ${name}. Pick another task name, or delete that branch.`)
+    }
+    plan.set(top, { members, start, continued })
   }
-  return groups
+  return plan
 }
 
 /** Keeps git, and the user's git status, away from enki's worktrees. */
@@ -95,29 +130,29 @@ function fillIn(main, workdir, settings) {
 }
 
 /** Creates the worktrees and returns the repos pointing at them. Undoes everything on failure. */
-export function createWorktrees({ root, repos, slug, settingsFor }) {
-  const groups = checkRepositories({ root, repos, slug })
+export function createWorktrees({ root, repos, slug, branch: own = slug, from, on = null, settingsFor }) {
+  const plan = checkRepositories({ root, repos, branch: own, from, on })
   ignoreWorktrees(root)
   const created = []
   const worktrees = []
   const result = []
   try {
-    for (const [top, members] of groups) {
+    for (const [top, { members, start, continued }] of plan) {
       const path = join(worktreesDir(root), slug, basename(top))
-      const branch = git(top, ['branch', '--show-current'])
-      const commit = git(top, ['rev-parse', 'HEAD'])
-      git(top, ['worktree', 'add', '-q', '-b', slug, path, branch])
-      created.push({ top, path })
-      worktrees.push({ top, path, branch: slug, base: { branch, commit } })
+      const commit = git(top, ['rev-parse', start])
+      const branch = on ?? own
+      git(top, ['worktree', 'add', '-q', ...(continued ? [] : ['-b', branch]), path, start])
+      created.push({ top, path, branch: continued ? null : branch })
+      worktrees.push({ top, path, branch, base: { branch: start, commit }, ...(continued ? { continued: true } : {}) })
       for (const repo of members) {
         const workdir = join(path, relative(top, repo.workdir))
         result.push({ ...repo, main: repo.workdir, workdir, worktree: path, ...fillIn(repo.workdir, workdir, settingsFor(repo)) })
       }
     }
   } catch (error) {
-    for (const { top, path } of created.reverse()) {
+    for (const { top, path, branch } of created.reverse()) {
       git(top, ['worktree', 'remove', '--force', path], { allowFail: true })
-      git(top, ['branch', '-D', slug], { allowFail: true })
+      if (branch) git(top, ['branch', '-D', branch], { allowFail: true })
     }
     throw error
   }
@@ -182,8 +217,9 @@ function restoreFilledIn(repos) {
 /**
  * Commits each worktree to its branch and removes it. Enki's own copies and links go first,
  * so a secret can't be committed. A failing git hook leaves everything as it was.
+ * A continued branch is never deleted, and abandoned work on it goes to a branch of its own.
  */
-export function finishWorktrees({ worktrees, repos, message, abandon = false }) {
+export function finishWorktrees({ worktrees, repos, message, branch: own, abandon = false }) {
   const results = []
   removeFilledIn(repos)
   for (const tree of worktrees) {
@@ -194,20 +230,27 @@ export function finishWorktrees({ worktrees, repos, message, abandon = false }) 
       results.push({ ...tree, committed: false })
       continue
     }
+    // Abandoned work never lands on a branch someone else may be reviewing.
+    const aside = abandon && tree.continued
+    if (aside) git(tree.path, ['switch', '-q', '-c', own])
     try {
       git(tree.path, ['commit', '-q', ...(abandon ? ['--no-verify'] : []), '-m', message])
     } catch (error) {
       git(tree.path, ['reset', '-q'], { allowFail: true })
+      if (aside) {
+        git(tree.path, ['switch', '-q', tree.branch], { allowFail: true })
+        git(tree.path, ['branch', '-D', own], { allowFail: true })
+      }
       restoreFilledIn(repos)
       throw new WorktreeError(`The commit failed, so the task isn't finished and its worktree is unchanged. A git hook may have refused it.\n${error.message}`)
     }
     const fullCommit = git(tree.path, ['rev-parse', 'HEAD'])
-    results.push({ ...tree, committed: true, commit: fullCommit.slice(0, 7), fullCommit, files: staged.length })
+    results.push({ ...tree, ...(aside ? { branch: own, aside: true } : {}), committed: true, commit: fullCommit.slice(0, 7), fullCommit, files: staged.length })
   }
   for (const tree of results) {
     git(tree.top, ['worktree', 'remove', tree.path])
-    // A branch with nothing on it would only be clutter.
-    if (!tree.committed) git(tree.top, ['branch', '-D', tree.branch], { allowFail: true })
+    // A new branch with nothing on it would only be clutter. A continued one was there before.
+    if (!tree.committed && !tree.continued) git(tree.top, ['branch', '-D', tree.branch], { allowFail: true })
   }
   return results
 }
@@ -221,7 +264,8 @@ export function commitMessage({ slug, id, requirements, abandon }) {
 /** The goal, in order of preference: a Goal section, a "Goal:" line, then the title. */
 export function goalOf(text) {
   const lines = text.split('\n').map(line => line.trim())
-  const clean = line => line.replace(/^[#>*\s-]+/, '').trim()
+  // Bold marks (**, __) are formatting, never part of a goal or a title.
+  const clean = line => line.replaceAll(/\*\*|__/g, '').replace(/^[#>*\s-]+/, '').trim()
   const section = lines.findIndex(line => /^#+\s*goal\b\s*$/i.test(line))
   if (section !== -1) {
     const first = lines.slice(section + 1).find(line => line && !line.startsWith('#'))

@@ -265,10 +265,10 @@ function codeReached(codeTop, commit, branch) {
 }
 
 /**
- * Brings each repo's memory up to date with the code branch you have checked out: every task
- * whose code has reached it gets its memory merged in.
+ * Brings each repo's memory up to date with a code branch, the one you have checked out unless
+ * `target` names another: every task whose code has reached it gets its memory merged in.
  */
-export function syncMemory(root, { only } = {}) {
+export function syncMemory(root, { only, target: into = null } = {}) {
   const config = loadConfig(root)
   const lines = []
   let blocked = false
@@ -284,7 +284,7 @@ export function syncMemory(root, { only } = {}) {
         continue
       }
     }
-    const target = currentBranch(codeDir)
+    const target = into ?? currentBranch(codeDir)
     if (!target) continue
     const created = ensureBranch(dir, target)
     if (created) lines.push(`${repo.name}: ${created}`)

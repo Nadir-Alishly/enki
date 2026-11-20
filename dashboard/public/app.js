@@ -656,7 +656,7 @@ function renderTask(task) {
     h('a', { href: projectHref(task.project.id) }, task.project.name),
     h('span', { 'aria-hidden': 'true' }, '/'),
     h('span', {}, task.id),
-    task.branch && [h('span', { 'aria-hidden': 'true' }, '·'), h('span', {}, task.base ? `${task.branch} from ${task.base}` : task.branch)],
+    task.branch && [h('span', { 'aria-hidden': 'true' }, '·'), h('span', {}, task.continues ? `${task.branch} · continues ${task.continues}` : task.base ? `${task.branch} from ${task.base}` : task.branch)],
     h('span', { 'aria-hidden': 'true' }, '·'),
     h('span', {}, `started ${ago(task.startedAt)}`),
   ]

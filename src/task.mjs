@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
-import { ROLES } from './config.mjs'
+import { isBranchName, ROLES } from './config.mjs'
 import { hasTeam, loadRoles, snapshotTeam, stepCapabilities, teamOf } from './agents.mjs'
 import { awaitingApproval, describeWorkflow, workflowGaps, workflowLine, edgeFor, handOffStep, planCheck, planReport, targetsOf, loadWorkflows, notReady, outcomesOf, phasesOf, readySteps, readWorkflowSnapshot, reopenPlan, resolveWorkflow, resumeStep, routeOutcome, runEnded, startRun, startStep as startRunStep, switchWorkflow, withoutSteps, workflowProblems, writeWorkflowSnapshot, DEFAULT_HANDOFFS, DEFAULT_WORKFLOW, WorkflowError } from './workflow.mjs'
 import { checkoutTaskMemory, finishTaskMemory, loadProjectConfig, loadTaskConfig, memoryMode, MemoryError, syncMemory, usesRepoMemory } from './memory.mjs'
@@ -22,6 +22,9 @@ import { writeRoleFile, writeRules } from './rules.mjs'
 import { createState, enkiHome, listTasks, PHASES, readEvents, readState, recordEvent, registerProject, resolveTask, tasksDir, updateState, writeJsonAtomic } from './state.mjs'
 
 export const SLUG = /^[a-z][a-z0-9-]{0,22}$/
+// A task's name is its branch: a slug, or folders before it, like fix/login-error. The slug, its last
+// part, names the task folder, its agents and its worktree, where a slash would make folders.
+const TASK_NAME = /^(?:[a-z0-9][a-z0-9-]*\/){0,3}[a-z][a-z0-9-]{0,22}$/
 
 /** Exit codes the orchestrator can branch on. */
 export const EXIT = { ok: 0, failed: 1, usage: 2, blocked: 3, timeout: 4, busy: 5, stalled: 6 }
@@ -288,14 +291,36 @@ export async function startRole(taskDir, role) {
   return name
 }
 
-export async function newTask({ root, slug, repoNames = [], workflow: workflowId = null }) {
+/**
+ * What `--on` continues: a finished task (its branch and repos) or a plain branch. A task made by
+ * continuing another is on that one's branch, so following its worktree keeps the whole chain on one.
+ */
+function continuedFrom(root, on) {
+  const earlier = listTasks(root).filter(task => task.slug === on || task.id === on || task.branch === on)
+  const open = earlier.find(task => task.phase !== 'done')
+  if (open) throw new EnkiError(`Task ${on} is still open. Ask for this in that task instead (enki resume ${on}).`)
+  const task = earlier.at(-1)
+  if (!task) return { branch: on }
+  return { branch: task.worktrees?.[0]?.branch ?? task.slug, slug: task.slug, taskDir: task.taskDir, repos: task.repos.map(repo => repo.name) }
+}
+
+export async function newTask({ root, name, repoNames = [], workflow: workflowId = null, on = null }) {
   requireHerdr()
-  if (!SLUG.test(slug)) throw new EnkiError('The slug must be short kebab-case: a lowercase letter, then letters, digits or hyphens, at most 23 characters.', EXIT.usage)
+  if (!TASK_NAME.test(name) || !isBranchName(name)) {
+    throw new EnkiError('A task name is kebab-case, at most 23 characters: a lowercase letter, then letters, digits or hyphens, like login-error. It may have folders before it, like fix/login-error or feature/dark-mode.', EXIT.usage)
+  }
+  const slug = name.split('/').at(-1)
+  const branch = name
   const config = loadProjectConfig(root)
   const existing = listTasks(root).find(task => task.slug === slug && task.phase !== 'done')
   if (existing) throw new EnkiError(`Task "${slug}" is already open: ${existing.taskDir}. Use: enki resume ${slug}`)
+  const continues = on ? continuedFrom(root, on) : null
+  if (continues && !config.worktrees) throw new EnkiError('Continuing a task needs worktrees: turn on "worktrees" in the project\'s Settings.')
+  if (continues && [on, continues.branch].some(item => item === name || item === slug)) throw new EnkiError(`Give this task its own name: "${name}" is the task or branch it continues.`, EXIT.usage)
 
-  let repos = selectRepos(root, config, repoNames)
+  // A continued task keeps the earlier one's repos, unless you name others.
+  const known = new Set(config.repos.map(repo => repo.name))
+  let repos = selectRepos(root, config, repoNames.length > 0 ? repoNames : (continues?.repos ?? []).filter(name => known.has(name)))
   const chosen = projectWorkflow(root, config, workflowId ?? config.workflow ?? DEFAULT_WORKFLOW)
   resolveTeamSkills(root, chosen.team, repos) // Fails here, before any tab opens.
   const projectId = ensureProjectId(root, config)
@@ -310,14 +335,14 @@ export async function newTask({ root, slug, repoNames = [], workflow: workflowId
   const memoryNotes = []
   if (privateMemory) {
     // Memory for the base branch has to include every task merged into it, before this one starts from it.
-    const synced = syncMemory(root)
+    const synced = syncMemory(root, { target: config.baseBranch })
     if (synced.blocked) throw new EnkiError(synced.lines.join('\n'))
     memoryNotes.push(...synced.lines)
   }
   let worktrees = []
   if (config.worktrees) {
     try {
-      ;({ repos, worktrees } = createWorktrees({ root, repos, slug, settingsFor: repo => worktreeSettings(config, repo) }))
+      ;({ repos, worktrees } = createWorktrees({ root, repos, slug, branch, from: config.baseBranch, on: continues?.branch, settingsFor: repo => worktreeSettings(config, repo) }))
     } catch (error) {
       throw asEnki(error, WorktreeError)
     }
@@ -327,7 +352,9 @@ export async function newTask({ root, slug, repoNames = [], workflow: workflowId
       // An unmigrated project keeps writing the old shared notes, never into the code repo.
       if (!privateMemory) return usesRepoMemory(root, repo) ? { ...repo, memoryDir: join(repo.workdir, '.enki') } : repo
       const tree = worktrees.find(item => item.path === repo.worktree)
-      const { path, note } = checkoutTaskMemory({ root, slug, repo, baseBranch: tree.base.branch })
+      // Memory branches are named after the task's slug, so a continued task starts from the earlier one's.
+      const memoryBase = tree.continued && continues.slug ? continues.slug : tree.base.branch
+      const { path, note } = checkoutTaskMemory({ root, slug, repo, baseBranch: memoryBase })
       if (note) memoryNotes.push(note)
       return { ...repo, memoryDir: path }
     })
@@ -361,10 +388,10 @@ export async function newTask({ root, slug, repoNames = [], workflow: workflowId
   mkdirSync(taskDir, { recursive: true })
   writeWorkflowSnapshot(taskDir, chosen.workflow)
   // The run starts now: Start passes the request on, so the first steps are queued for their briefs.
-  const state = createState({ taskDir, slug, projectId, projectRoot: root, repos, worktrees, env, team: snapshotTeam(taskDir, chosen.team), workflow: chosen.workflow.id, run: startRun(chosen.workflow), orchestratorPane: process.env.HERDR_PANE_ID ?? null })
+  const state = createState({ taskDir, slug, branch, projectId, projectRoot: root, repos, worktrees, env, team: snapshotTeam(taskDir, chosen.team), workflow: chosen.workflow.id, run: startRun(chosen.workflow), orchestratorPane: process.env.HERDR_PANE_ID ?? null, continues: continues && { branch: continues.branch, slug: continues.slug ?? null, taskDir: continues.taskDir ?? null } })
   registerProject({ id: projectId, root })
   writeRules(state, config)
-  recordEvent(taskDir, 'task.created', { slug, repos: repos.map(repo => repo.name), worktrees: worktrees.map(tree => ({ path: tree.path, branch: tree.branch, base: tree.base })), ports, memory: memoryNotes })
+  recordEvent(taskDir, 'task.created', { slug, repos: repos.map(repo => repo.name), worktrees: worktrees.map(tree => ({ path: tree.path, branch: tree.branch, base: tree.base, continued: Boolean(tree.continued) })), continues: state.continues, ports, memory: memoryNotes })
   // The orchestrator's own Claude session, so the dashboard can count its tokens too.
   const orchestrator = state.orchestratorPane && (await herdr.listAgents().catch(() => [])).find(agent => agent.pane_id === state.orchestratorPane)
   if (orchestrator?.agent_session?.value) recordEvent(taskDir, 'orchestrator.session', { session: orchestrator.agent_session.value })
@@ -1312,7 +1339,8 @@ export async function status({ root, slug }) {
     `Task ${task.id}  phase: ${task.phase}  approved: ${task.approved}  workflow: ${task.workflow ?? 'fixed (before workflows)'}`,
     `Folder: ${task.taskDir}`,
     `Scope: ${task.scope.join(', ') || 'none'}  Repos: ${task.repos.map(repo => `${repo.name}${repo.url ? ` (${repo.url})` : ''}`).join(', ')}`,
-    ...(task.worktrees ?? []).map(tree => `Branch: ${tree.branch}, from ${tree.base.branch}, in ${tree.path}`),
+    ...(task.continues?.slug ? [`Continues task ${task.continues.slug}: ${task.continues.taskDir}`] : []),
+    ...(task.worktrees ?? []).map(tree => `Branch: ${tree.branch}, ${tree.continued ? `continued from ${tree.base.commit.slice(0, 7)}` : `from ${tree.base.branch}`}, in ${tree.path}`),
     ...task.repos.filter(repo => repo.memoryDir).map(repo => `Memory for ${repo.name}: ${repo.memoryDir}`),
     ...(task.database ? [`Database: ${task.database}`] : []),
     `Tests since the last change: ${currentVerify(task) ? (task.verify.passed ? 'passed' : task.verify.accepted ? 'accepted' : 'failed') : 'not run'}`,
@@ -1387,7 +1415,7 @@ async function finishTask(task, abandon) {
     const message = commitMessage({ slug: task.slug, id: task.id, requirements: existsSync(requirementsPath) ? readFileSync(requirementsPath, 'utf8') : null, abandon })
     let results
     try {
-      results = finishWorktrees({ worktrees: task.worktrees, repos: task.repos, message, abandon })
+      results = finishWorktrees({ worktrees: task.worktrees, repos: task.repos, message, branch: task.branch ?? task.slug, abandon })
     } catch (error) {
       recordEvent(task.taskDir, 'worktree.commit_failed', { message: error.message.slice(0, 300) })
       throw asEnki(error, WorktreeError)
@@ -1412,13 +1440,7 @@ async function finishTask(task, abandon) {
         }
       }
     }
-    for (const tree of results) {
-      notes.push(
-        tree.committed
-          ? `Committed ${tree.files} file(s) to branch ${tree.branch} (${tree.commit}), from ${tree.base.branch}. Review with: git diff ${tree.base.branch}...${tree.branch}`
-          : `Nothing changed, so branch ${tree.branch} was deleted.`,
-      )
-    }
+    for (const tree of results) notes.push(finishNote(tree))
     recordEvent(task.taskDir, 'worktree.finished', { results: results.map(tree => ({ branch: tree.branch, committed: tree.committed, commit: tree.commit ?? null })) })
   }
   if (task.databaseReady) {
@@ -1431,6 +1453,20 @@ async function finishTask(task, abandon) {
   }
   await releasePorts(task.taskDir)
   return notes
+}
+
+/** What happened to one worktree's branch, and how to review it. */
+function finishNote(tree) {
+  const start = tree.base.commit.slice(0, 7)
+  if (tree.aside) return `The abandoned work was committed to a new branch, ${tree.branch} (${tree.commit}), so ${tree.base.branch} is unchanged.`
+  if (tree.continued) {
+    return tree.committed
+      ? `Committed ${tree.files} file(s) on top of branch ${tree.branch} (${start} → ${tree.commit}). Review this task's change with: git diff ${start}..${tree.branch}. Push ${tree.branch} to update its pull request.`
+      : `Nothing changed, so branch ${tree.branch} is as it was.`
+  }
+  return tree.committed
+    ? `Committed ${tree.files} file(s) to branch ${tree.branch} (${tree.commit}), from ${tree.base.branch}. Review with: git diff ${tree.base.branch}...${tree.branch}`
+    : `Nothing changed, so branch ${tree.branch} was deleted.`
 }
 
 async function serverCleanup(task) {
@@ -1629,6 +1665,7 @@ export function skillsReport({ root, available = false }) {
 
 const INIT_CONFIG = {
   mode: 'auto',
+  baseBranch: 'dev',
   repos: [],
 }
 
