@@ -20,6 +20,7 @@ const git = (cwd, ...args) => {
 function gitProject(config = {}, { branch = 'feature', commit = true } = {}) {
   const project = makeProject({
     worktrees: true,
+    baseBranch: branch,
     repos: [{ path: 'web', url: 'http://127.0.0.1:4321', test: ['true'], testGlobs: ['tests/**'], devServer: { start: 'serve --port {port}' } }],
     ports: { from: 47100, to: 47199 },
     ...config,
@@ -95,10 +96,40 @@ test('an existing branch with the task name is refused', () => {
   assert.match(result.err, /branch called "demo" already exists/)
 })
 
-test('a detached HEAD is refused', () => {
+test('a missing working branch is refused, naming the setting', () => {
+  refusedCleanly(gitProject({ baseBranch: 'dev' }), /no branch "dev", the branch tasks fork from.*baseBranch/)
+})
+
+test('a working branch behind its upstream is refused, until it is updated', () => {
   const project = gitProject()
+  const remote = join(project.root, 'remote.git')
+  git(project.root, 'clone', '-q', '--bare', project.web, remote)
+  git(project.web, 'remote', 'add', 'origin', remote)
+  git(project.web, 'fetch', '-q', 'origin')
+  git(project.web, 'branch', '-q', '--set-upstream-to', 'origin/feature')
+  const other = join(project.root, 'other')
+  git(project.root, 'clone', '-q', remote, other)
+  writeFileSync(join(other, 'pushed.txt'), 'x\n')
+  git(other, 'add', '-A')
+  git(other, 'commit', '-qm', 'pushed by someone')
+  git(other, 'push', '-q', 'origin', 'feature')
+  git(project.web, 'fetch', '-q', 'origin')
+  refusedCleanly(project, /upstream has 1 commit\(s\) that feature doesn't.*git fetch origin feature:feature/s)
+  git(project.web, 'pull', '-q', '--ff-only')
+  assert.equal(project.enki(['task', 'new', 'demo']).code, 0)
+})
+
+test('a task forks from the working branch, whatever the main tree has checked out, even dirty', () => {
+  const project = gitProject()
+  git(project.web, 'checkout', '-q', '-b', 'elsewhere')
+  writeFileSync(join(project.web, 'src/app.js'), 'unrelated work in progress\n')
   git(project.web, 'checkout', '-q', '--detach')
-  refusedCleanly(project, /detached HEAD/)
+  const result = project.enki(['task', 'new', 'demo'])
+  assert.equal(result.code, 0, result.err)
+  const tree = project.state('demo').worktrees[0]
+  assert.equal(tree.base.branch, 'feature')
+  assert.equal(tree.base.commit, git(project.web, 'rev-parse', 'feature'))
+  assert.equal(readFileSync(join(worktreeOf(project), 'src/app.js'), 'utf8'), 'app\n')
 })
 
 test('a folder that is not a git repo is refused, pointing at the setting', () => {
@@ -109,7 +140,7 @@ test('a folder that is not a git repo is refused, pointing at the setting', () =
 
 // Creating the worktree
 
-test('the task works in a worktree on its own branch, from the current branch', () => {
+test('the task works in a worktree on its own branch, from the working branch', () => {
   const project = started()
   const tree = worktreeOf(project)
   const state = project.state('demo')
@@ -433,6 +464,83 @@ test('two tasks in one repo each get their own tree, branch and port, and finish
   assert.equal(readFileSync(join(project.web, 'src/app.js'), 'utf8'), 'app\n')
 })
 
+// Continuing a finished task on its branch
+
+/** A finished task "first" that committed one change, from pane a. */
+function finishedFirst() {
+  const project = gitProject()
+  const a = { HERDR_PANE_ID: 'w1:a' }
+  assert.equal(project.enki(['task', 'new', 'first'], a).code, 0)
+  writeFileSync(join(worktreeOf(project, 'first'), 'src/app.js'), 'first version\n')
+  readyToFinish(project, '# Plan\n', 'first', a)
+  assert.equal(project.enki(['phase', 'done'], a).code, 0)
+  return project
+}
+
+test('--on continues a finished task on its own branch, and commits on top of it', () => {
+  const project = finishedFirst()
+  const b = { HERDR_PANE_ID: 'w1:b' }
+  const before = git(project.web, 'rev-parse', 'first')
+  const created = project.enki(['task', 'new', 'review-fix', '--on', 'first'], b)
+  assert.equal(created.code, 0, created.err)
+  assert.match(created.out, /Continues branch first, at [0-9a-f]{7}/)
+  const tree = worktreeOf(project, 'review-fix')
+  assert.equal(git(tree, 'branch', '--show-current'), 'first')
+  assert.equal(readFileSync(join(tree, 'src/app.js'), 'utf8'), 'first version\n', 'it starts from the earlier work')
+  const state = project.state('review-fix')
+  assert.equal(state.continues.slug, 'first')
+  assert.match(project.enki(['status'], b).out, /Continues task first.*\n.*Branch: first, continued from/)
+  writeFileSync(join(tree, 'src/app.js'), 'fixed after review\n')
+  readyToFinish(project, '# Plan\n', 'review-fix', b)
+  const done = project.enki(['phase', 'done'], b)
+  assert.equal(done.code, 0, done.err)
+  assert.match(done.out, new RegExp(`on top of branch first \\(${before.slice(0, 7)} → [0-9a-f]{7}\\)\\. Review this task's change with: git diff ${before.slice(0, 7)}\\.\\.first\\. Push first to update its pull request`))
+  assert.equal(git(project.web, 'rev-parse', 'first^'), before, 'one commit on top of the earlier one')
+  assert.equal(git(project.web, 'show', 'first:src/app.js'), 'fixed after review')
+  assert.equal(git(project.web, 'branch', '--list', 'review-fix'), '', 'no branch of its own')
+})
+
+test('a continued task that changes nothing leaves the branch as it was', () => {
+  const project = finishedFirst()
+  const b = { HERDR_PANE_ID: 'w1:b' }
+  const before = git(project.web, 'rev-parse', 'first')
+  assert.equal(project.enki(['task', 'new', 'review-fix', '--on', 'first'], b).code, 0)
+  readyToFinish(project, '# Plan\n', 'review-fix', b)
+  assert.match(project.enki(['phase', 'done'], b).out, /Nothing changed, so branch first is as it was/)
+  assert.equal(git(project.web, 'rev-parse', 'first'), before)
+})
+
+test('abandoning a continued task keeps its work on a branch of its own, away from the pull request', () => {
+  const project = finishedFirst()
+  const b = { HERDR_PANE_ID: 'w1:b' }
+  const before = git(project.web, 'rev-parse', 'first')
+  assert.equal(project.enki(['task', 'new', 'review-fix', '--on', 'first'], b).code, 0)
+  writeFileSync(join(worktreeOf(project, 'review-fix'), 'src/app.js'), 'half done\n')
+  const result = project.enki(['phase', 'done', '--abandon'], b)
+  assert.equal(result.code, 0, result.err)
+  assert.match(result.out, /committed to a new branch, review-fix .*so first is unchanged/)
+  assert.equal(git(project.web, 'rev-parse', 'first'), before)
+  assert.equal(git(project.web, 'show', 'review-fix:src/app.js'), 'half done')
+})
+
+test('--on works with any branch, and refuses an open task, an unknown branch, its own name and a checked-out branch', () => {
+  const project = gitProject()
+  const a = { HERDR_PANE_ID: 'w1:a' }
+  const b = { HERDR_PANE_ID: 'w1:b' }
+  assert.equal(project.enki(['task', 'new', 'first'], a).code, 0)
+  assert.match(project.enki(['task', 'new', 'second', '--on', 'first'], b).err, /Task first is still open/)
+  assert.match(project.enki(['task', 'new', 'second', '--on', 'nope'], b).err, /No branch "nope"/)
+  git(project.web, 'branch', 'pr-branch')
+  assert.match(project.enki(['task', 'new', 'pr-branch', '--on', 'pr-branch'], b).err, /its own name/)
+  git(project.web, 'checkout', '-q', 'pr-branch')
+  assert.match(project.enki(['task', 'new', 'second', '--on', 'pr-branch'], b).err, /"pr-branch" is checked out in .*Switch that tree/)
+  git(project.web, 'checkout', '-q', 'feature')
+  const result = project.enki(['task', 'new', 'second', '--on', 'pr-branch'], b)
+  assert.equal(result.code, 0, result.err)
+  assert.equal(git(worktreeOf(project, 'second'), 'branch', '--show-current'), 'pr-branch')
+  assert.equal(project.state('second').continues.slug, null)
+})
+
 // What each role may touch
 
 const decision = result => result.json?.hookSpecificOutput?.permissionDecision ?? null
@@ -519,4 +627,20 @@ test('the commit subject comes from the goal, never the "Requirements" title', a
   assert.equal(goalOf('# Requirements: dark mode\n\nSome text.\n'), 'dark mode')
   assert.equal(goalOf('# Requirements\n'), null)
   assert.equal(goalOf(''), null)
+  assert.equal(goalOf('# Requirements\n\n**Goal:** Listeners can change **every** pause.\n'), 'Listeners can change every pause.', 'bold marks are dropped')
+  assert.equal(goalOf('## Goal\n\n**Listeners** change __pauses__.\n'), 'Listeners change pauses.')
+})
+
+test('a task named with folders, like fix/login-error, gets that branch, and its last part names the rest', () => {
+  const project = gitProject()
+  const result = project.enki(['task', 'new', 'fix/login-error'])
+  assert.equal(result.code, 0, result.err)
+  const state = project.state('login-error')
+  assert.equal(state.branch, 'fix/login-error')
+  assert.match(state.taskDir, /-login-error$/)
+  assert.equal(git(worktreeOf(project, 'login-error'), 'branch', '--show-current'), 'fix/login-error')
+  assert.equal(project.enki(['status', '--task', 'fix/login-error']).code, 0, 'the full name finds it too')
+  for (const bad of ['Fix/login', 'fix//login', '/login', 'fix/', 'fix/this-name-is-far-too-long-now', 'a/b/c/d/login']) {
+    assert.match(project.enki(['task', 'new', bad]).err, /fix\/login-error or feature\/dark-mode/, bad)
+  }
 })

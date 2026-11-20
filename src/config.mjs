@@ -41,6 +41,8 @@ export const DEFAULTS = {
   policy: { secrets: [], protected: [], bash: [] },
   memory: 'repo',
   worktrees: true,
+  // The branch every new task forks from, whatever the main tree has checked out.
+  baseBranch: 'dev',
   ports: { from: 4400, to: 4999 },
   worktree: { copy: ['.env', '.env.*'], link: ['node_modules'], install: null, env: {} },
   database: null,
@@ -56,6 +58,9 @@ const TOP_KEYS = new Set(['$schema', 'id', 'team', ...Object.keys(DEFAULTS)])
 const REPO_KEYS = new Set(['name', 'path', 'test', 'lint', 'url', 'testGlobs', 'devServer', 'gate', 'worktree'])
 const WORKTREE_KEYS = new Set(['copy', 'link', 'install', 'env'])
 const DATABASE_KEYS = new Set(['copy', 'drop', 'env', 'enabled', 'default'])
+// git check-ref-format --branch, without starting git.
+export const isBranchName = value =>
+  typeof value === 'string' && /^(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*@\{)[^\s~^:?*[\\]+$/.test(value) && !/(^|\/)\.|[./]$|\.lock$|^@$/.test(value)
 const isStringMap = value => value !== null && typeof value === 'object' && !Array.isArray(value) && Object.values(value).every(item => typeof item === 'string')
 
 function validateWorktree(value, label, problems) {
@@ -211,6 +216,7 @@ export function validateConfig(raw) {
   if (raw.memory !== undefined && !['repo', 'private'].includes(raw.memory)) problems.push('memory: must be "repo" or "private"')
   if (raw.memory === 'private' && raw.worktrees === false) problems.push('memory: "private" needs worktrees, because memory follows the task branch enki commits')
   if (raw.worktrees !== undefined && typeof raw.worktrees !== 'boolean') problems.push('worktrees: must be true or false')
+  if (raw.baseBranch !== undefined && !isBranchName(raw.baseBranch)) problems.push('baseBranch: the name of a branch, like "dev"')
   if (raw.worktree !== undefined) validateWorktree(raw.worktree, 'worktree', problems)
   if (raw.ports !== undefined) {
     const { from, to } = raw.ports

@@ -11,12 +11,14 @@ Every task starts here. You carry messages: the user's words to the team, the pl
 
 ## 1. Start the task
 
-1. Pick a short kebab-case slug and run `enki task new <slug> [--repo <name>]`. It runs the project's default workflow. Add `--workflow <id>` only if the user named one (`enki workflow list` shows them). The planner can still propose another in its plan.
-   - It creates the task's worktree on a new branch named after the slug, gives it a free port, builds the task tab and starts the steps that come before the plan (the scout and the planner, in enki's own workflows).
-   - If it refuses because of uncommitted changes, no commits, or an existing branch, tell the user exactly what it said: committing is theirs to do.
+1. The user names the task, and the name is its branch. Use the name they gave. If they gave none, ask for one before anything else (you may suggest one), and wait for their answer. A name is kebab-case, at most 23 characters (a lowercase letter, then letters, digits or hyphens), and may have folders before it, like `fix/login-error` or `feature/dark-mode`. Its last part, the slug, names the task folder and agents. If theirs isn't valid, ask again and show a valid form of it.
+2. Run `enki task new <name> [--repo <name>]`. It runs the project's default workflow. Add `--workflow <id>` only if the user named one (`enki workflow list` shows them). The planner can still propose another in its plan.
+   - It creates the task's worktree on a new branch with the task's name, from the project's working branch (`baseBranch`, `dev` by default), gives it a free port, builds the task tab and starts the steps that come before the plan (the scout and the planner, in enki's own workflows).
+   - **Continuing earlier work.** When the user asks for changes to an earlier task's work, its pull request or its branch (review feedback, a fix, a related addition), add `--on <earlier task's slug or the branch>`. The new task works on that branch and commits on top of it, so pushing it updates the PR. If reviewers pushed commits to it, ask the user to pull them first. In the scout's and the planner's briefs, point to the earlier task's `requirements.md`, approved plan and report (`enki status` gives its folder), and write this task's requirements as the change now asked for, not the whole feature again.
+   - If it refuses (uncommitted changes, no commits, a missing or out-of-date branch, an existing branch, a branch checked out elsewhere, an open task), tell the user exactly what it said: committing, pulling and switching branches are theirs to do.
    - If it exits 3, a folder trust prompt is waiting: ask the user whether to trust the folder, and if they agree, run `enki answer <step> trust`, then `enki start <step>`.
-2. Write the user's request to `<task folder>/request.md`, in their own words: what they asked for, and anything they pointed to (files, links, screenshots). Add nothing of your own: no approach, no assumptions, no plan.
-3. Run `enki status`, and note each affected repo's notes at the `Memory for <repo>` path it gives. A project that hasn't run `enki migrate` keeps its notes in `.enki/notes/<repo>.md`.
+3. Write the user's request to `<task folder>/request.md`, in their own words: what they asked for, and anything they pointed to (files, links, screenshots). Add nothing of your own: no approach, no assumptions, no plan.
+4. Run `enki status`, and note each affected repo's notes at the `Memory for <repo>` path it gives. A project that hasn't run `enki migrate` keeps its notes in `.enki/notes/<repo>.md`.
 
 ## 2. Run the steps before the plan
 

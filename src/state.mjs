@@ -91,12 +91,14 @@ export function readEvents(taskDir) {
   return readFileSync(path, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
 }
 
-export function createState({ taskDir, slug, projectId, projectRoot, repos, orchestratorPane, worktrees = [], env = {}, team = {}, workflow = null, run = null }) {
+export function createState({ taskDir, slug, branch = slug, projectId, projectRoot, repos, orchestratorPane, worktrees = [], env = {}, team = {}, workflow = null, run = null, continues = null }) {
   const now = new Date().toISOString()
   const state = {
     v: STATE_VERSION,
     id: basename(taskDir),
     slug,
+    // The task's name, and its branch: the slug, or with folders before it, like fix/<slug>.
+    branch,
     projectId,
     projectRoot,
     taskDir,
@@ -115,6 +117,8 @@ export function createState({ taskDir, slug, projectId, projectRoot, repos, orch
     orchestratorPane,
     repos,
     worktrees,
+    // The earlier task, or branch, this one adds to: { branch, slug?, taskDir? }.
+    continues,
     env,
     database: null,
     herdr: { tab: null, panes: {} },
@@ -147,7 +151,7 @@ export function listTasks(root) {
 /** A worker's task comes from its environment, an orchestrator's from its herdr pane. */
 export function resolveTask(root, { slug, env = process.env } = {}) {
   if (slug) {
-    const matches = listTasks(root).filter(task => task.slug === slug || task.id === slug)
+    const matches = listTasks(root).filter(task => task.slug === slug || task.id === slug || task.branch === slug)
     if (matches.length > 1) throw new Error(`"${slug}" matches several tasks: ${matches.map(task => task.id).join(', ')}`)
     return matches[0] ?? null
   }

@@ -174,6 +174,8 @@ export function taskSummary(task, events, live) {
     round: task.round,
     branch: task.worktrees?.[0]?.branch ?? null,
     base: task.worktrees?.[0]?.base?.branch ?? null,
+    // The earlier task this one adds to, or the branch when it was a plain one.
+    continues: task.continues ? (task.continues.slug ?? task.continues.branch) : null,
     startedAt: task.createdAt,
     finishedAt: end,
     elapsedMs: Date.parse(end ?? new Date().toISOString()) - Date.parse(task.createdAt),

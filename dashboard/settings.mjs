@@ -4,7 +4,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { configPath, DATABASE_MODES, DEFAULTS, EFFORTS, ROLES, SKILL_NAME, validateConfig } from '../src/config.mjs'
+import { configPath, DATABASE_MODES, DEFAULTS, EFFORTS, isBranchName, ROLES, SKILL_NAME, validateConfig } from '../src/config.mjs'
 import { listWorkflows } from '../src/library.mjs'
 import { loadProjectConfig } from '../src/memory.mjs'
 import { builtinRoles, loadRoles } from '../src/agents.mjs'
@@ -58,6 +58,7 @@ export function editableValues(raw, roles = builtinRoles()) {
     workflow: raw.workflow ?? DEFAULTS.workflow,
     mode: raw.mode ?? DEFAULTS.mode,
     worktrees: raw.worktrees ?? DEFAULTS.worktrees,
+    baseBranch: raw.baseBranch ?? DEFAULTS.baseBranch,
     timeouts: Object.fromEntries(Object.keys(DEFAULTS.timeouts).map(key => [key, minutes(raw.timeouts?.[key] ?? DEFAULTS.timeouts[key])])),
     browser: { driver: raw.browser?.driver ?? DEFAULTS.browser.driver, headless: raw.browser?.headless ?? DEFAULTS.browser.headless },
     ports: { from: raw.ports?.from ?? DEFAULTS.ports.from, to: raw.ports?.to ?? DEFAULTS.ports.to },
@@ -83,6 +84,8 @@ function readOnly(project, raw) {
         name: repo.name,
         path: repo.path,
         branch: existsSync(dir) ? git(dir, ['branch', '--show-current'], { allowFail: true }) || null : null,
+        // To warn when the working branch is missing from a repo.
+        branches: existsSync(dir) ? (git(dir, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/'], { allowFail: true }) ?? '').split('\n').filter(Boolean) : [],
         test: repo.test,
         devServer: repo.devServer.managedBy === 'user' ? 'Started by you' : repo.devServer.start ?? null,
       }
@@ -176,6 +179,9 @@ export function applyChanges(raw, changes, { roles = new Set(ROLES), workflows =
     } else if (path === 'mode') {
       if (!['auto', 'explicit'].includes(value)) bad(path, 'Choose auto or explicit.')
       else next.mode = value
+    } else if (path === 'baseBranch') {
+      if (!isBranchName(value)) bad(path, 'Enter a branch name, like dev.')
+      else next.baseBranch = value
     } else if (path === 'worktrees' || path === 'browser.headless') {
       if (typeof value !== 'boolean') bad(path, 'Must be on or off.')
       else put(next, path, value)
