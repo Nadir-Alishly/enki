@@ -65,7 +65,7 @@
   "bash": [
     {
       "id": "git-history",
-      "pattern": "^git(?:\\s+(?:-C|-c)\\s+\\S+|\\s+--\\S+)*\\s+(?:commit|push|pull|fetch|merge|rebase|cherry-pick|revert|am|tag(?!\\s+(?:-l|--list)\\b))\\b",
+      "pattern": "^git(?:\\s+(?:-C|-c)\\s+\\S+|\\s+--\\S+)*\\s+(?:commit|push|pull|fetch|merge(?!-base\\b)|rebase|cherry-pick|revert|am|tag(?!\\s+(?:-l|--list)\\b))\\b",
       "reason": "Agents don't commit or touch remotes. The user commits after review."
     },
     {

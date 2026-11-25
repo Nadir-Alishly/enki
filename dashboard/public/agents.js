@@ -13,15 +13,17 @@ const WRITE = [
   ['tests', 'Test files only', 'Writes only files that match the repo’s test patterns. It can’t touch the code under test.'],
   ['code', 'Code, never tests', 'Changes source, config and docs. Test files belong to another step.'],
   ['all', 'Code and tests', 'Changes source and tests alike.'],
+  ['map', 'The map only', 'Writes only the task’s codebase map, in the repo’s memory. It changes no code.'],
 ]
 const FLAGS = [
-  ['blind', 'Blind', 'Sees only its brief and the requirements: other steps’ reports, the plan and the code being changed are hidden from it.'],
+  ['blind', 'Blind', 'Sees only its brief and the spec: other steps’ reports, the plan and the code being changed are hidden from it.'],
   ['browser', 'Browser', 'Gets its own Playwright browser (or Claude in Chrome), kept to the project’s local URLs.'],
   ['server', 'Dev server', 'May start and stop the project’s dev server with enki server.'],
-  ['plans', 'Plans', 'Writes the plan the user approves. A step with this leads into Approval, and writes nothing else.'],
+  ['specs', 'Writes the spec', 'Writes the spec the user approves first: what to build. A step with this leads into Spec approval, and writes nothing else.'],
+  ['plans', 'Plans', 'Writes the plan the user approves after the spec. A step with this leads into Approval, and writes nothing else.'],
 ]
 const EFFORT_WORDS = { low: 'low', medium: 'medium', high: 'high', xhigh: 'extra high', max: 'max' }
-const RULE = { none: 'writes nothing but its report', tests: 'writes test files only', code: 'writes code, never tests', all: 'writes code and tests' }
+const RULE = { none: 'writes nothing but its report', tests: 'writes test files only', code: 'writes code, never tests', all: 'writes code and tests', map: 'writes the codebase map, nothing else' }
 // The DOM's own replaceChildren prints false as text; h() skips it, and so does this.
 const fill = (node, ...kids) => node.replaceChildren(...kids.filter(kid => kid !== false && kid != null))
 const clone = value => JSON.parse(JSON.stringify(value))
@@ -29,7 +31,7 @@ const clock = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute:
 
 /** What an agent may do, in a phrase: "writes code, never tests, has a browser". */
 export const ruleOf = caps =>
-  [caps.plans ? 'writes the plan, nothing else' : RULE[caps.write], caps.blind && 'blind: never sees the work', caps.browser && 'has a browser', caps.server && 'starts and stops the dev server'].filter(Boolean).join(', ')
+  [caps.specs ? 'writes the spec, nothing else' : caps.plans ? 'writes the plan, nothing else' : RULE[caps.write], caps.blind && 'blind: never sees the work', caps.browser && 'has a browser', caps.server && 'starts and stops the dev server'].filter(Boolean).join(', ')
 
 export function createAgents({ h, svg, getJson, postJson, learnRoles, agentsHref, agentHref, newAgentHref, workflowHref }) {
   const stores = new Map()
@@ -66,7 +68,9 @@ export function createAgents({ h, svg, getJson, postJson, learnRoles, agentsHref
   function swatch(color, pattern, size) {
     const fill = HEX.test(color ?? '') ? color : 'var(--border)'
     const style = { width: `${size}px`, height: `${size}px` }
-    if (pattern === 'stripes') style.background = `repeating-linear-gradient(135deg, ${fill} 0 ${Math.max(2, size / 6)}px, var(--black-950) ${Math.max(2, size / 6)}px ${Math.max(3, size / 4)}px)`
+    const [on, period] = [Math.max(2, size / 6), Math.max(3, size / 4)]
+    if (pattern === 'stripes') style.background = `repeating-linear-gradient(135deg, ${fill} 0 ${on}px, var(--black-950) ${on}px ${period}px)`
+    else if (pattern === 'cross') style.background = `repeating-linear-gradient(45deg, ${fill} 0 ${on}px, transparent ${on}px ${period}px), repeating-linear-gradient(135deg, ${fill} 0 ${on}px, var(--black-950) ${on}px ${period}px)`
     else if (pattern === 'dashed') Object.assign(style, { background: 'transparent', border: `2px dashed ${fill}` })
     else style.background = fill
     return h('span', { class: 'agentswatch', 'aria-hidden': 'true', style })
@@ -254,7 +258,7 @@ export function createAgents({ h, svg, getJson, postJson, learnRoles, agentsHref
     let n = 1
     while (s.data.agents.some(agent => agent.id === `agent-${n}`)) n++
     return {
-      agent: { id: `agent-${n}`, name: `New agent ${n}`, type: 'reviewer', capabilities: { write: 'none', blind: false, browser: false, server: false, plans: false }, outcomes: [{ id: 'done', description: 'The work is finished: it goes to the next step' }, { id: 'blocked', description: 'Something stops the work: the reason is in the report' }], effort: 'high', skills: [] },
+      agent: { id: `agent-${n}`, name: `New agent ${n}`, type: 'reviewer', capabilities: { write: 'none', blind: false, browser: false, server: false, specs: false, plans: false }, outcomes: [{ id: 'done', description: 'The work is finished: it goes to the next step' }, { id: 'blocked', description: 'Something stops the work: the reason is in the report' }], effort: 'high', skills: [] },
       instructions: '',
     }
   }
@@ -306,6 +310,8 @@ export function createAgents({ h, svg, getJson, postJson, learnRoles, agentsHref
     if (e.ui.timeout !== undefined && !/^\s*\d*\s*$/.test(e.ui.timeout)) errs.timeout = 'Enter whole minutes, 1 or more.'
     else if (e.ui.timeout !== undefined && e.ui.timeout.trim() && Number(e.ui.timeout) < 1) errs.timeout = 'Enter whole minutes, 1 or more.'
     if (a.capabilities.plans && a.capabilities.write !== 'none') errs.plans = 'A planning step writes only its plan. Choose “Its report only” above, or turn Plans off.'
+    if (a.capabilities.specs && a.capabilities.write !== 'none') errs.specs = 'A spec step writes only its spec. Choose “Its report only” above, or turn Writes the spec off.'
+    if (a.capabilities.specs && a.capabilities.plans) errs.specs = 'An agent writes the spec or the plan, not both.'
     const seen = new Set()
     a.outcomes.forEach((outcome, index) => {
       if (!OUTCOME.test(outcome.id)) errs[`o${index}`] = `Name outcome ${index + 1} with a short lower-case word, like done or needs-info.`

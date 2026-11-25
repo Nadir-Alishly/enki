@@ -4,7 +4,8 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { ConfigError, DEFAULTS, findProjectRoot, ROLES } from './config.mjs'
-import { loadProjectConfig, loadTaskConfig, migrate, MemoryError, syncMemory } from './memory.mjs'
+import { loadProjectConfig, loadTaskConfig, migrate, MemoryError, readMainMemory, syncMemory } from './memory.mjs'
+import { listsAreas } from './map.mjs'
 
 const loadConfigDefaults = () => ({ ...DEFAULTS, browser: { ...DEFAULTS.browser } })
 import { DashboardError, dashboardDisabled, dashboardStatus, dashboardUrl, ensureDashboard, stopDashboard } from './dashboard.mjs'
@@ -36,7 +37,7 @@ Work      enki next | enki ask <step> <brief-file> [--step <n>[,<n>…]] [--repo
           enki answer <step> <option|trust> [--by user]
 Server    enki server start|stop|restart|status [--repo <name>]
 Secrets   enki secret set <name> [<value>] | get <name> | list | remove <name>
-Memory    enki migrate --memory repo|private | enki memory sync | enki memory merge <slug>
+Memory    enki migrate --memory repo|private | enki memory check | enki memory sync | enki memory merge <slug>
 Progress  enki phase <name> | enki phase done --abandon | enki rules
 Workflows enki workflow list | show <id> | use <id> | copy <id> <new-id> [--to library|project]
           enki workflow export <id> [--out <file>] | validate <file> | import <file> --by user
@@ -144,6 +145,11 @@ async function doctor() {
       const migrated = JSON.parse(readFileSync(join(root, '.enki', 'config.json'), 'utf8')).memory !== undefined
       add(migrated, migrated ? `Memory: ${config.memory}` : 'Memory', migrated ? '' : 'old shared layout: run enki migrate --memory repo, or private for team repos')
       for (const warning of task.portWarnings(config)) console.log(warning)
+      if (migrated) {
+        for (const repo of config.repos.filter(item => !listsAreas(readMainMemory(root, item, 'map/README.md') ?? ''))) {
+          console.log(`note: ${repo.name} has no codebase map yet. Build one with a task on the map workflow: enki task new <name> --workflow map --repo ${repo.name}`)
+        }
+      }
       if (config.browser.driver === 'playwright' && config.repos.some(repo => repo.url)) {
         const problem = playwright.playwrightProblem(config)
         add(!problem, 'Playwright for QA', problem ?? '')
@@ -230,8 +236,13 @@ const commands = {
   migrate(args, flags) {
     console.log(migrate(requireRoot(), flags.memory).join('\n'))
   },
-  memory(args) {
+  memory(args, flags) {
     const root = requireRoot()
+    if (args[0] === 'check') {
+      const { ok, lines } = task.checkMaps({ root, slug: flags.task })
+      console.log(lines.join('\n'))
+      return ok ? EXIT.ok : EXIT.failed
+    }
     if (args[0] === 'sync') {
       const { lines, blocked } = syncMemory(root)
       console.log(lines.length > 0 ? lines.join('\n') : 'Memory is up to date.')
@@ -242,7 +253,7 @@ const commands = {
       console.log(lines.length > 0 ? lines.join('\n') : `No unmerged memory branch called ${args[1]}.`)
       return blocked ? EXIT.failed : EXIT.ok
     }
-    throw new EnkiError('Usage: enki memory sync | enki memory merge <slug>', EXIT.usage)
+    throw new EnkiError('Usage: enki memory check | enki memory sync | enki memory merge <slug>', EXIT.usage)
   },
   secret(args) {
     const [action, name, ...rest] = args
@@ -283,7 +294,7 @@ const commands = {
         `Task ${state.id} created, workflow ${state.workflow}. Running: ${running.join(', ') || 'nothing yet'}`,
         `Folder: ${state.taskDir}`,
         ...state.worktrees.map(tree => (tree.continued ? `Continues branch ${tree.branch}, at ${tree.base.commit.slice(0, 7)}` : `Branch ${tree.branch}, from ${tree.base.branch}`)),
-        ...(state.continues?.slug ? [`Earlier task: ${state.continues.taskDir} (its requirements.md, approved plan and report are what's already there)`] : []),
+        ...(state.continues?.slug ? [`Earlier task: ${state.continues.taskDir} (its spec.md, or requirements.md for older tasks, its approved plan and report are what's already there)`] : []),
         `Tab: ${state.herdr.tab}`,
         `Next: write the user's request to ${state.taskDir}/request.md in their own words, then: enki next`,
       ].join('\n'),

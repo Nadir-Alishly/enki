@@ -1,0 +1,28 @@
+{
+  "id": "mapper",
+  "name": "Mapper",
+  "type": "scout",
+  "capabilities": {
+    "write": "map",
+    "blind": false,
+    "browser": false,
+    "server": false
+  },
+  "outcomes": [
+    {
+      "id": "done",
+      "description": "Every area in the approved outline is written: the map is complete"
+    },
+    {
+      "id": "more",
+      "description": "The areas in this brief are written, and the outline has others still to write"
+    },
+    {
+      "id": "blocked",
+      "description": "Couldn't go on: the reason is in the report"
+    }
+  ],
+  "model": "claude-sonnet-5-5",
+  "effort": "high",
+  "timeout": 3600000
+}

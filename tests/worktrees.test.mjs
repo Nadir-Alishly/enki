@@ -54,10 +54,10 @@ function started(config, options) {
 
 /** Takes a task to the point it may finish: approved, tested, reviewed. */
 function readyToFinish(project, plan = '# Plan\n', slug = 'demo', pane = {}) {
-  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: project.planReady(plan, pane) } }, { ...IDENTITY, ...pane })
+  const spec = '# Spec\n\n## Goal\n\nSay hello properly.\n\n## Acceptance criteria\n\n1. Hello.\n\n## Public interface\n\nNone.\n'
+  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: project.planReady(plan, pane, { spec }) } }, { ...IDENTITY, ...pane })
   const team = project.enki(['team', 'start'], pane)
   assert.equal(team.code, 0, team.err)
-  project.write(join(project.taskDir(slug), 'requirements.md'), '# Requirements\n\nGoal: say hello properly.\n')
   project.runWorkflow(slug, pane)
 }
 
@@ -256,9 +256,17 @@ test('env values fill in ports, and land in copied env files and worker panes', 
   assert.equal(pane.env.API_URL, `http://127.0.0.1:${port}/api`)
 })
 
-test('a port placeholder for an unknown repo is an error', () => {
-  const project = gitProject({ worktree: { env: { X: '{port:nope}' } } })
-  assert.match(project.enki(['task', 'new', 'demo']).err, /no repo "nope"/)
+test('a port placeholder for an unknown repo is an error, and leaves nothing behind', () => {
+  refusedCleanly(gitProject({ worktree: { env: { X: '{port:nope}' } } }), /no repo "nope"/)
+})
+
+test('a port placeholder for a repo outside the task is that repo\'s main port', () => {
+  const web = { path: 'web', url: 'http://127.0.0.1:4321', test: ['true'], testGlobs: ['tests/**'], devServer: { start: 'serve --port {port}' }, worktree: { env: { API_URL: 'http://127.0.0.1:{port:api}/v1' } } }
+  const project = gitProject({ repos: [web, { path: 'api', url: 'http://127.0.0.1:5555', test: ['true'], testGlobs: ['tests/**'], devServer: { start: 'x' } }] })
+  mkdirSync(join(project.root, 'api'), { recursive: true })
+  const result = project.enki(['task', 'new', 'demo', '--repo', 'web'])
+  assert.equal(result.code, 0, result.err)
+  assert.match(readFileSync(join(worktreeOf(project), '.env'), 'utf8'), /^API_URL=http:\/\/127\.0\.0\.1:5555\/v1$/m)
 })
 
 // Databases
@@ -371,7 +379,7 @@ test('finishing commits to the branch, keeps secrets out, and removes the worktr
   assert.ok(!existsSync(tree), 'worktree removed')
   const files = git(project.web, 'show', '--name-only', '--format=', 'demo').split('\n').sort()
   assert.deepEqual(files, ['src/app.js', 'src/new.js'])
-  assert.equal(git(project.web, 'log', '-1', '--format=%s', 'demo'), 'demo: say hello properly.')
+  assert.equal(git(project.web, 'log', '-1', '--format=%s', 'demo'), 'demo: Say hello properly.', 'the goal comes from the approved spec')
   assert.match(git(project.web, 'log', '-1', '--format=%b', 'demo'), /Enki-Task: .*-demo/)
   assert.equal(git(project.web, 'rev-parse', 'feature'), project.state('demo').worktrees[0].base.commit, 'the base branch is unchanged')
   assert.equal(git(project.web, 'status', '--porcelain'), '')

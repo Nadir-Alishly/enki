@@ -114,7 +114,8 @@ test('a plugin\'s nested skills, listed in its plugin.json, are found and load',
   skill(join(folder, 'skills', 'productivity'), 'grilling', 'Grill the user.')
   mkdirSync(join(folder, '.claude-plugin'))
   writeFileSync(join(folder, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'matt', skills: ['./skills/productivity/grilling'] }))
-  const env = fakeClaude(project, [{ id: 'matt@market', enabled: true, installPath: folder }])
+  // A built-in plugin has no folder: it's passed over.
+  const env = fakeClaude(project, [{ id: 'telemetry@builtin', enabled: true }, { id: 'matt@market', enabled: true, installPath: folder }])
   assert.match(project.enki(['skills', '--available'], env).out, /matt:grilling/)
   assert.equal(project.enki(['task', 'new', 'demo'], env).code, 0)
   project.approve()

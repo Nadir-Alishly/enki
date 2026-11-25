@@ -68,7 +68,7 @@ test('the project’s workflows are listed with enki’s, and the library’s ag
 test('a custom team runs a task end to end, and its own step reports its own outcomes', () => {
   const project = customProject({ workflow: 'docs-check' })
   assert.equal(project.enki(['task', 'new', 'demo']).code, 0)
-  assert.deepEqual(Object.keys(project.state('demo').herdr.panes).sort(), ['coder', 'docs', 'planner'], 'a pane for each agent step')
+  assert.deepEqual(Object.keys(project.state('demo').herdr.panes).sort(), ['coder', 'docs', 'planner', 'spec-writer'], 'a pane for each agent step')
   project.approve('# Plan\n\nTests: none\n\n1. [Coder] Do it\n2. [Docs] Check the docs\n3. [Orchestrator] Report\n')
   assert.equal(project.state('demo').workflowProblems, null)
   assert.equal(project.enki(['team', 'start']).code, 0)
@@ -113,7 +113,7 @@ test('a plan can pick another workflow, and the task gets panes for its steps', 
 test('a plan naming a workflow that doesn’t exist, or a step it doesn’t have, goes back to the planner, not to the user', () => {
   const project = customProject()
   project.enki(['task', 'new', 'demo'])
-  project.enki(['ask', 'scout', project.brief()])
+  project.specApproved()
   const planner = () => project.state('demo').run.steps.planner
   project.report('demo', 'planner-r1.md', fullPlan('# Plan\n\nWorkflow: nope\n'))
   assert.match(project.enki(['ask', 'planner', project.brief()]).out, /the plan can't go to the user yet: .*no workflow "nope"/)
@@ -121,7 +121,8 @@ test('a plan naming a workflow that doesn’t exist, or a step it doesn’t have
   project.enki(['resume', 'planner', '--note', 'There is no workflow "nope".'])
   project.report('demo', 'planner-r2.md', fullPlan('# Plan\n\nWorkflow: docs-check\n\n1. [Designer] Draw it\n'))
   assert.match(project.enki(['ask', 'planner', project.brief()]).out, /step 1 belongs to "designer", which isn't in the workflow/)
-  assert.equal(project.state('demo').phase, 'intake', 'the user never saw either plan')
+  assert.equal(project.state('demo').run.steps.approval.status, 'idle', 'the user never saw either plan')
+  assert.equal(project.state('demo').approved, false)
 })
 
 test('export carries the workflow’s own agents with their instructions; import needs the user and adds them to the library', () => {

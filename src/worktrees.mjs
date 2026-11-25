@@ -82,7 +82,7 @@ export function checkRepositories({ root, repos, branch, from, on = null }) {
         .filter(Boolean)
         .map(line => line.slice(3))
         // .enki is enki's own, apart from a root repo's memory files, which the task would start without.
-        .filter(path => !(join(top, path).startsWith(enkiDir + sep) || join(top, path) === enkiDir) || ROOT_MEMORY.has(relative(root, join(top, path))))
+        .filter(path => !(join(top, path).startsWith(enkiDir + sep) || join(top, path) === enkiDir) || ROOT_MEMORY.has(relative(root, join(top, path))) || relative(root, join(top, path)).startsWith('.enki/map/'))
       if (dirty.length > 0) {
         const shown = dirty.slice(0, 10).join(', ') + (dirty.length > 10 ? `, and ${dirty.length - 10} more` : '')
         throw new WorktreeError(`${name} has uncommitted changes on ${start}, and a task starts from its last commit. Commit or stash them first: ${shown}`)

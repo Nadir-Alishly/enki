@@ -5,6 +5,7 @@ import { pluginRoot } from './paths.mjs'
 import { teamOf } from './agents.mjs'
 import { parseSkill, renderSkills } from './skills.mjs'
 import { playbookTexts, taskNotesPath } from './memory.mjs'
+import { hasMap, mapDir, rootText } from './map.mjs'
 
 const fill = (template, values) =>
   template.replace(/\{\{(\w+)\}\}/g, (match, key) => (key in values ? String(values[key]) : match))
@@ -16,7 +17,7 @@ function repoLines(state, config) {
       const lines = [`- **${repo.name}** at \`${repo.workdir}\``]
       const tree = state.worktrees?.find(item => item.path === repo.worktree)
       if (tree) lines.push(`  - Worktree on branch \`${tree.branch}\`, from \`${tree.base.branch}\`. Work only here: the main tree at \`${repo.main}\` is read-only`)
-      lines.push(`  - Notes: \`${taskNotesPath(state, repo)}\``)
+      lines.push(hasMap(repo.memoryDir) ? `  - Map: \`${mapDir(repo.memoryDir)}/\`` : `  - Notes: \`${taskNotesPath(state, repo)}\``)
       if (repo.url) lines.push(`  - Local URL: ${repo.url}`)
       if (source?.test.length) lines.push(`  - Tests: \`${source.test.join('`, `')}\``)
       if (source?.lint.length) lines.push(`  - Lint: \`${source.lint.join('`, `')}\``)
@@ -28,6 +29,17 @@ function repoLines(state, config) {
       return lines.join('\n')
     })
     .join('\n')
+}
+
+/** Each repo's map root in full, its headings moved down under the repo's own. */
+function mapSection(state) {
+  const roots = state.repos.filter(repo => hasMap(repo.memoryDir))
+  if (roots.length === 0) return ''
+  const texts = roots.map(repo => {
+    const text = rootText(repo.memoryDir).trim().replace(/^(#{1,4}) /gm, '$1## ')
+    return `### ${repo.name}: \`${mapDir(repo.memoryDir)}/README.md\`\n\n${text}`
+  })
+  return `## Codebase map\n\nEach repo's map starts at its root, below. Links are relative to the root's folder; \`repo:path\` points into another repo's map. Read the areas your brief names, and follow their links deeper as you need. If the map is wrong about what you see in the code, say so in your report.\n\n${texts.join('\n\n')}\n`
 }
 
 /** One heading's text from every playbook in the task: the project's, then each repo's. */
@@ -63,6 +75,7 @@ export function renderRules(state, config) {
     repos: repoLines(state, config),
     scope: state.scope.length > 0 ? state.scope.join(', ') : 'none',
     playbook: playbook === '' ? '' : `## Project rules\n\n${playbook}\n`,
+    map: mapSection(state),
   })
 }
 

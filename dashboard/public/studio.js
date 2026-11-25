@@ -8,17 +8,20 @@ import { arrowDefs, autoLayout, drawGraph, FIXED, nearestSegment, outputsOf, rou
 
 const clone = value => JSON.parse(JSON.stringify(value))
 const ID = /^[a-z][a-z0-9-]{0,30}$/
-const RESERVED = new Set(['orchestrator', 'start', 'approval', 'end', 'verify', 'otherwise', 'user', 'request', 'plan'])
+const RESERVED = new Set(['orchestrator', 'start', 'spec-approval', 'approval', 'end', 'verify', 'otherwise', 'user', 'request', 'spec', 'plan'])
+/** Targets that stand alone, never in a list with others. */
+const ALONE = ['end', 'spec-approval', 'approval']
 const NARROW = '(max-width: 900px)'
 const GRID = 8
 const HISTORY = 100
 const FIXED_TEXT = {
   start: 'The orchestrator passes on the user’s request. Connect “request” to the first step.',
-  approval: 'The user approves the plan here. “approved” starts the work, and “changes” goes back to the planner with their words. Only a planning step leads in.',
+  'spec-approval': 'The user approves the spec here: what is to be built. “approved” goes to the planning step, and “changes” goes back to the spec writer with their words. Only a spec step leads in.',
+  approval: 'The user approves the plan here: how it will be built. “approved” starts the work, “change-plan” goes back to the planner and “change-spec” to the spec writer, with their words. Only a planning step leads in.',
   end: 'The workflow is done: the orchestrator writes the notes and the report.',
 }
-const WRITE_WORD = { none: 'read-only', tests: 'writes tests', code: 'writes code', all: 'writes code and tests' }
-const capsText = caps => [WRITE_WORD[caps.write], caps.blind && 'blind', caps.plans && 'plans', caps.browser && 'browser', caps.server && 'server'].filter(Boolean).join(' · ')
+const WRITE_WORD = { none: 'read-only', tests: 'writes tests', code: 'writes code', all: 'writes code and tests', map: 'writes the map' }
+const capsText = caps => [WRITE_WORD[caps.write], caps.blind && 'blind', caps.specs && 'spec', caps.plans && 'plans', caps.browser && 'browser', caps.server && 'server'].filter(Boolean).join(' · ')
 const snap = value => Math.round(value / GRID) * GRID
 const normalize = edge => ({ ...edge, to: edge.to.length === 1 ? edge.to[0] : edge.to })
 /** Forgets where the matching lines bend: a line that's gone, or changed ends, starts straight again. */
@@ -156,7 +159,7 @@ export function createStudio({ h, getJson, postJson, learnRoles, roleOf, library
       let targets = targetsOf(edge)
       if (targets.includes(to)) return
       // End and Approval stand alone: connecting to one replaces the rest, and the other way round.
-      targets = to === 'end' || to === 'approval' || targets.some(target => target === 'end' || target === 'approval') ? [to] : [...targets, to]
+      targets = ALONE.includes(to) || targets.some(target => ALONE.includes(target)) ? [to] : [...targets, to]
       edge.to = targets.length === 1 ? targets[0] : targets
       dropRoutes(draft, ([f, o, t]) => f === from && o === on && !targets.includes(t))
     })
@@ -182,7 +185,7 @@ export function createStudio({ h, getJson, postJson, learnRoles, roleOf, library
     commit(s, draft => {
       const edge = draft.edges.find(item => item.from === from && item.on === on)
       let targets = targetsOf(edge).filter(target => target !== was)
-      targets = to === 'end' || to === 'approval' || targets.some(target => target === 'end' || target === 'approval') ? [to] : [...new Set([...targets, to])]
+      targets = ALONE.includes(to) || targets.some(target => ALONE.includes(target)) ? [to] : [...new Set([...targets, to])]
       edge.to = targets.length === 1 ? targets[0] : targets
       dropRoutes(draft, ([f, o, t]) => f === from && o === on && !targets.includes(t))
       dropRoutes(draft, ([f, o, t]) => f === from && o === on && t === was)
@@ -350,7 +353,7 @@ export function createStudio({ h, getJson, postJson, learnRoles, roleOf, library
       'div',
       { class: 'studio__lead', role: 'note' },
       h('span', { class: 'studio__swatch', 'aria-hidden': 'true', style: { background: 'var(--orange)' } }),
-      h('span', { class: 'studio__rolename' }, h('strong', {}, 'Orchestrator'), h('span', { class: 'muted' }, 'Carries messages: passes on the request at Start, relays the planner’s questions and plan, writes the report at End.')),
+      h('span', { class: 'studio__rolename' }, h('strong', {}, 'Orchestrator'), h('span', { class: 'muted' }, 'Carries messages: passes on the request at Start, relays the spec writer’s and the planner’s questions, the spec and the plan, writes the report at End.')),
     )
     canvas.append(svg, lead, tools, picker)
     const root = h(
@@ -840,7 +843,7 @@ export function createStudio({ h, getJson, postJson, learnRoles, roleOf, library
 
   function targetChoices(s, node) {
     return [
-      ...s.draft.nodes.filter(item => item.kind !== 'start' && item.kind !== 'end').map(item => [item.id, item.kind === 'approval' ? 'Approval' : item.kind === 'verify' ? `Tests (${item.id})` : item.id]),
+      ...s.draft.nodes.filter(item => item.kind !== 'start' && item.kind !== 'end').map(item => [item.id, item.kind === 'approval' ? 'Approval' : item.kind === 'spec-approval' ? 'Spec approval' : item.kind === 'verify' ? `Tests (${item.id})` : item.id]),
       ['end', 'End'],
     ]
   }

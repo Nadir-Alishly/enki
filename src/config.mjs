@@ -2,7 +2,7 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
-export const ROLES = ['scout', 'planner', 'coder', 'tester', 'qa', 'reviewer']
+export const ROLES = ['scout', 'spec-writer', 'planner', 'coder', 'tester', 'qa', 'reviewer']
 export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk']
 export const BROWSER_DRIVERS = ['playwright', 'chrome', 'none']
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
@@ -136,7 +136,7 @@ function validateRepo(repo, index, problems, names) {
     if (repo[key] !== undefined && !isStringArray(repo[key])) problems.push(`${label}.${key}: must be an array of strings`)
   }
   if (repo.url !== undefined && !/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/.test(String(repo.url))) {
-    problems.push(`${label}.url: must be a localhost URL`)
+    problems.push(`${label}.url: must be a localhost URL${String(repo.url).includes('{port}') ? ' with a real port, not {port}: enki puts each task\'s own port in it' : ''}`)
   }
   if (repo.devServer !== undefined) {
     if (typeof repo.devServer !== 'object' || repo.devServer === null) problems.push(`${label}.devServer: must be an object`)

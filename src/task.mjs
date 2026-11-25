@@ -1,14 +1,15 @@
 // Task operations: everything that used to be shell the orchestrator typed by hand.
 import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmdirSync, rmSync, writeFileSync, writeSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { isBranchName, ROLES } from './config.mjs'
 import { hasTeam, loadRoles, snapshotTeam, stepCapabilities, teamOf } from './agents.mjs'
-import { awaitingApproval, describeWorkflow, workflowGaps, workflowLine, edgeFor, handOffStep, planCheck, planReport, targetsOf, loadWorkflows, notReady, outcomesOf, phasesOf, readySteps, readWorkflowSnapshot, reopenPlan, resolveWorkflow, resumeStep, routeOutcome, runEnded, startRun, startStep as startRunStep, switchWorkflow, withoutSteps, workflowProblems, writeWorkflowSnapshot, DEFAULT_HANDOFFS, DEFAULT_WORKFLOW, WorkflowError } from './workflow.mjs'
-import { checkoutTaskMemory, finishTaskMemory, loadProjectConfig, loadTaskConfig, memoryMode, MemoryError, syncMemory, usesRepoMemory } from './memory.mjs'
+import { APPROVALS, reopenSpec, specReport, stripLoaded, waitingApproval, describeWorkflow, workflowGaps, workflowLine, edgeFor, handOffStep, planCheck, planReport, targetsOf, loadWorkflows, notReady, outcomesOf, phasesOf, readySteps, readWorkflowSnapshot, reopenPlan, resolveWorkflow, resumeStep, routeOutcome, runEnded, startRun, startStep as startRunStep, switchWorkflow, withoutSteps, workflowProblems, writeWorkflowSnapshot, DEFAULT_HANDOFFS, DEFAULT_WORKFLOW, WorkflowError } from './workflow.mjs'
+import { checkoutTaskMemory, finishTaskMemory, loadProjectConfig, loadTaskConfig, memoryMode, MemoryError, memoryRepo, syncMemory, usesRepoMemory } from './memory.mjs'
 import { runChecks, snapshotTree } from './checks.mjs'
+import { checkTaskMaps, hasMap, mapIsEmpty, unmappedNotes } from './map.mjs'
 import * as herdr from './herdr.mjs'
 import { HerdrError } from './herdr.mjs'
 import { pluginRoot } from './paths.mjs'
@@ -101,11 +102,14 @@ const worktreeSettings = (config, repo) => {
   return { ...config.worktree, ...own, env: { ...config.worktree.env, ...own.env } }
 }
 
-const portValues = state => ({ task: taskToken(state.slug), ports: Object.fromEntries(state.repos.filter(repo => repo.port).map(repo => [repo.name, repo.port])) })
+/** Each repo's main port, from its url: what `{port:<repo>}` means for a repo the task has no copy of. */
+const mainPorts = config => Object.fromEntries(config.repos.filter(repo => repo.url).map(repo => [repo.name, Number(new URL(repo.url).port) || undefined]).filter(([, port]) => port))
+const portValues = (state, config) => ({ task: taskToken(state.slug), ports: { ...mainPorts(config), ...Object.fromEntries(state.repos.filter(repo => repo.port).map(repo => [repo.name, repo.port])) } })
 
 /** The env values a repo gets in this task: its worktree settings and the plan's database mode. */
 function repoEnv(state, config, repo) {
-  const values = { ...portValues(state), port: repo.port ?? undefined }
+  const values = portValues(state, config)
+  values.port = repo.port ?? values.ports[repo.name]
   const env = {}
   for (const [key, value] of Object.entries(worktreeSettings(config, repo).env)) env[key] = fill(value, values)
   return { ...env, ...databaseEnv(config.database, state.database, values) }
@@ -304,6 +308,30 @@ function continuedFrom(root, on) {
   return { branch: task.worktrees?.[0]?.branch ?? task.slug, slug: task.slug, taskDir: task.taskDir, repos: task.repos.map(repo => repo.name) }
 }
 
+/** Does a team have a step that writes the codebase map? */
+const writesMap = team => Object.values(team).some(entry => entry.capabilities?.write === 'map')
+
+/** Map problems block a task's end; warnings are only shown. */
+function mapCheck(task) {
+  const results = checkTaskMaps(task, loadTaskConfig(task))
+  const errors = results.flatMap(result => result.errors.map(error => `${result.repo}: ${error}`))
+  if (errors.length > 0) throw new EnkiError(`The map has problems to fix first:\n- ${errors.join('\n- ')}`)
+  return results.flatMap(result => result.warnings.map(warning => `warning: ${result.repo}: ${warning}`))
+}
+
+/** enki memory check: the task's maps, problems first. */
+export function checkMaps({ root, slug }) {
+  const task = requireTask(root, slug)
+  const results = checkTaskMaps(task, loadTaskConfig(task))
+  if (results.length === 0) return { ok: true, lines: ['No repo in this task has a map yet.'] }
+  const lines = results.flatMap(result => [
+    ...result.errors.map(error => `error: ${result.repo}: ${error}`),
+    ...result.warnings.map(warning => `warning: ${result.repo}: ${warning}`),
+    ...(result.errors.length + result.warnings.length === 0 ? [`${result.repo}: the map holds together.`] : []),
+  ])
+  return { ok: results.every(result => result.errors.length === 0), lines }
+}
+
 export async function newTask({ root, name, repoNames = [], workflow: workflowId = null, on = null }) {
   requireHerdr()
   if (!TASK_NAME.test(name) || !isBranchName(name)) {
@@ -323,6 +351,9 @@ export async function newTask({ root, name, repoNames = [], workflow: workflowId
   let repos = selectRepos(root, config, repoNames.length > 0 ? repoNames : (continues?.repos ?? []).filter(name => known.has(name)))
   const chosen = projectWorkflow(root, config, workflowId ?? config.workflow ?? DEFAULT_WORKFLOW)
   resolveTeamSkills(root, chosen.team, repos) // Fails here, before any tab opens.
+  if (writesMap(chosen.team) && memoryMode(root) !== 'private' && repos.some(repo => !usesRepoMemory(root, repo))) {
+    throw new EnkiError('A map is written into each repo\'s memory, and this project still keeps its notes in the old shared layout. Run enki migrate --memory repo (or private, for team repos) first.')
+  }
   const projectId = ensureProjectId(root, config)
   const taskDir = join(tasksDir(root), `${today()}-${slug}`)
   if (existsSync(taskDir)) throw new EnkiError(`${taskDir} already exists. Pick a different slug.`)
@@ -340,51 +371,71 @@ export async function newTask({ root, name, repoNames = [], workflow: workflowId
     memoryNotes.push(...synced.lines)
   }
   let worktrees = []
-  if (config.worktrees) {
-    try {
-      ;({ repos, worktrees } = createWorktrees({ root, repos, slug, branch, from: config.baseBranch, on: continues?.branch, settingsFor: repo => worktreeSettings(config, repo) }))
-    } catch (error) {
-      throw asEnki(error, WorktreeError)
-    }
-  }
-  try {
-    repos = repos.map(repo => {
-      // An unmigrated project keeps writing the old shared notes, never into the code repo.
-      if (!privateMemory) return usesRepoMemory(root, repo) ? { ...repo, memoryDir: join(repo.workdir, '.enki') } : repo
-      const tree = worktrees.find(item => item.path === repo.worktree)
-      // Memory branches are named after the task's slug, so a continued task starts from the earlier one's.
-      const memoryBase = tree.continued && continues.slug ? continues.slug : tree.base.branch
-      const { path, note } = checkoutTaskMemory({ root, slug, repo, baseBranch: memoryBase })
-      if (note) memoryNotes.push(note)
-      return { ...repo, memoryDir: path }
-    })
-  } catch (error) {
+  const memoryTrees = []
+  // Anything that fails from here on takes back what was made: no stray branches, worktrees or ports.
+  const undo = () => {
     for (const tree of worktrees) {
       git(tree.top, ['worktree', 'remove', '--force', tree.path], { allowFail: true })
       git(tree.top, ['branch', '-D', tree.branch], { allowFail: true })
     }
-    throw asEnki(error, MemoryError)
+    for (const tree of memoryTrees) {
+      git(tree.dir, ['worktree', 'remove', '--force', tree.path], { allowFail: true })
+      git(tree.dir, ['branch', '-D', slug], { allowFail: true })
+    }
+    try {
+      rmdirSync(join(worktreesDir(root), slug))
+    } catch {
+      // Not there, or not empty.
+    }
+    return releasePorts(taskDir).catch(() => {})
   }
+  let env
   let ports = {}
   try {
-    const managed = repos.filter(repo => repo.url && sourceRepo(config, repo).devServer.managedBy === 'enki').map(repo => repo.name)
-    if (managed.length > 0) ports = await allocatePorts({ taskDir, names: managed, ...config.ports })
-  } catch (error) {
-    for (const tree of worktrees) {
-      git(tree.top, ['worktree', 'remove', '--force', tree.path], { allowFail: true })
-      git(tree.top, ['branch', '-D', tree.branch], { allowFail: true })
+    if (config.worktrees) {
+      try {
+        ;({ repos, worktrees } = createWorktrees({ root, repos, slug, branch, from: config.baseBranch, on: continues?.branch, settingsFor: repo => worktreeSettings(config, repo) }))
+      } catch (error) {
+        throw asEnki(error, WorktreeError)
+      }
     }
-    throw new EnkiError(error.message)
-  }
-  repos = repos.map(repo => {
-    if (!ports[repo.name]) return repo
-    const url = new URL(repo.url)
-    url.port = String(ports[repo.name])
-    return { ...repo, url: url.toString(), port: ports[repo.name] }
-  })
+    try {
+      repos = repos.map(repo => {
+        // An unmigrated project keeps writing the old shared notes, never into the code repo.
+        if (!privateMemory) return usesRepoMemory(root, repo) ? { ...repo, memoryDir: join(repo.workdir, '.enki') } : repo
+        const tree = worktrees.find(item => item.path === repo.worktree)
+        // Memory branches are named after the task's slug, so a continued task starts from the earlier one's.
+        const memoryBase = tree.continued && continues.slug ? continues.slug : tree.base.branch
+        const { path, note } = checkoutTaskMemory({ root, slug, repo, baseBranch: memoryBase })
+        memoryTrees.push({ dir: memoryRepo(root, repo.name), path })
+        if (note) memoryNotes.push(note)
+        return { ...repo, memoryDir: path }
+      })
+    } catch (error) {
+      throw asEnki(error, MemoryError)
+    }
+    try {
+      const managed = repos.filter(repo => repo.url && sourceRepo(config, repo).devServer.managedBy === 'enki').map(repo => repo.name)
+      if (managed.length > 0) ports = await allocatePorts({ taskDir, names: managed, ...config.ports })
+    } catch (error) {
+      throw new EnkiError(error.message)
+    }
+    repos = repos.map(repo => {
+      if (!ports[repo.name]) return repo
+      const url = new URL(repo.url)
+      url.port = String(ports[repo.name])
+      return { ...repo, url: url.toString(), port: ports[repo.name] }
+    })
 
-  const draft = { slug, repos, database: null }
-  const env = applyEnv(draft, config)
+    try {
+      env = applyEnv({ slug, repos, database: null }, config)
+    } catch (error) {
+      throw asEnki(error, DatabaseError)
+    }
+  } catch (error) {
+    await undo()
+    throw error
+  }
   mkdirSync(taskDir, { recursive: true })
   writeWorkflowSnapshot(taskDir, chosen.workflow)
   // The run starts now: Start passes the request on, so the first steps are queued for their briefs.
@@ -487,7 +538,7 @@ async function prepareWorktreeForTeam(task, config) {
   }
   if (task.database === 'copy' && !task.databaseReady) {
     try {
-      copyDatabase(config.database, portValues(task), task.projectRoot)
+      copyDatabase(config.database, portValues(task, config), task.projectRoot)
     } catch (error) {
       throw asEnki(error, DatabaseError)
     }
@@ -561,14 +612,20 @@ function inputLines(state, role, inputs = []) {
   const caps = stepCapabilities(state, role)
   const blind = Boolean(caps?.blind)
   const lines = []
-  // A planning step reads the request on every visit: the user's answers are added to it.
-  if (caps?.plans || inputs.some(input => input.from === 'request')) lines.push(`- The user's request${caps?.plans ? ', with every answer they have given since' : ''}: ${join(state.taskDir, 'request.md')}`)
+  // The spec and planning steps read the request on every visit: the user's answers are added to it.
+  const writes = caps?.specs || caps?.plans
+  if (writes || inputs.some(input => input.from === 'request')) lines.push(`- The user's request${writes ? ', with every answer they have given since' : ''}: ${join(state.taskDir, 'request.md')}`)
+  if (caps?.plans && existsSync(join(state.taskDir, 'spec.md'))) lines.push(`- The spec the user approved${inputs.some(input => input.from === 'spec') && (state.run?.steps[role]?.visits ?? 0) > 0 ? ', changed since your last plan: plan from it again' : ''}: ${join(state.taskDir, 'spec.md')}`)
   for (const input of inputs) {
-    if (input.from === 'request' || input.from === 'plan') continue
+    if (input.from === 'request' || input.from === 'plan' || input.from === 'spec') continue
     if (input.from === 'orchestrator') {
       if (input.note) lines.push(`- From the orchestrator: ${input.note}`)
+    } else if (input.from === 'spec-approval' || (input.from === 'approval' && input.outcome === 'change-spec')) {
+      lines.push(`- The user asked for changes to the spec${input.from === 'approval' ? ', when they saw the plan' : ''}${input.report ? ` (${join(state.taskDir, input.report)})` : ''}${input.note ? `: ${input.note}` : ''}. Write the whole spec again with them applied.`)
     } else if (input.from === 'approval') {
       lines.push(`- The user asked for changes to the plan${input.report ? ` (${join(state.taskDir, input.report)})` : ''}${input.note ? `: ${input.note}` : ''}. Write the whole plan again with them applied.`)
+    } else if (caps?.specs && input.outcome === 'spec') {
+      lines.push(`- ${input.from} can't meet the approved spec${input.report ? `, for the reasons in ${join(state.taskDir, input.report)}` : ''}. Write the whole spec again, asking the user first if meeting them changes what they asked for.`)
     } else if (!blind) {
       lines.push(`- ${input.from} reported "${input.outcome}"${input.report ? `: ${join(state.taskDir, input.report)}` : ''}`)
     }
@@ -585,7 +642,7 @@ function workflowLines(state, role) {
   const team = teamOf(state)
   const roles = loadRoles(state.projectRoot)
   const current = describeWorkflow(readWorkflowSnapshot(state.taskDir), node => team[node.id] ?? roles.get(node.agent) ?? null)
-  const others = [...loadWorkflows(state.projectRoot).values()].map(({ source, path, ...workflow }) => workflow).filter(workflow => workflow.id !== state.workflow && workflowProblems(workflow, roles).length === 0)
+  const others = [...loadWorkflows(state.projectRoot).values()].map(stripLoaded).filter(workflow => workflow.id !== state.workflow && workflowProblems(workflow, roles).length === 0)
   return [
     '',
     'The workflow this task runs. Enki enforces it: plan only work its steps may do, and give each plan step an owner from it.',
@@ -684,6 +741,13 @@ function settleStep(taskDir, id, { outcome: given = null, byUser = false, note =
     const workflow = readWorkflowSnapshot(taskDir)
     // A plan goes to the user only when enki can run it: otherwise it goes back through the orchestrator.
     const edge = edgeFor(workflow, id, outcome)
+    if (edge && targetsOf(edge).includes('spec-approval')) {
+      const problems = specProblems(current, report)
+      if (problems.length > 0) {
+        result = handOffStep(current.run, workflow, id, outcome, `the spec can't go to the user yet: ${problems.join('; ')}`)
+        return
+      }
+    }
     if (edge && targetsOf(edge).includes('approval')) {
       const problems = planProblems(current, report)
       if (problems.length > 0) {
@@ -692,12 +756,21 @@ function settleStep(taskDir, id, { outcome: given = null, byUser = false, note =
       }
     }
     result = routeOutcome(current.run, workflow, id, outcome, { report, byUser, note })
+    if (result.to[0] === 'spec-approval') current.phase = 'spec'
     if (result.to[0] === 'approval') current.phase = 'planning'
-    if (id === 'approval' && outcome === 'changes') {
+    // Work sent back before Spec approval (the user's changes to the spec, or a plan that can't
+    // meet it) means a new spec, which the user approves again, and then a new plan.
+    if (!result.handedOff && id !== 'start' && result.to.some(target => phasesOf(workflow).beforeSpec.has(target)) && !phasesOf(workflow).beforeSpec.has(id)) {
       current.phase = 'intake'
+      current.specApproved = false
+      current.approved = false
+    }
+    if (id === 'approval' && outcome === 'change-plan') {
+      current.phase = 'planning'
       current.approved = false
       current.run.steps.approval.inputs = []
     }
+    if (id === 'spec-approval' && outcome === 'changes') current.run.steps['spec-approval'].inputs = []
   })
   if (!result) {
     if (outcome) recordEvent(taskDir, 'step.outcome', { step: id, outcome, intake: true })
@@ -719,11 +792,11 @@ function routingText(task, id, outcome, result) {
       lines.push(`${id} has been handed to you ${task.run.steps[id].handoffs} times, more than its limit. Stop here: tell the user what's open, and let them decide (enki outcome ${id} <outcome> --by user, or enki phase done --abandon).`)
     } else if (result.reason.startsWith('limit')) {
       lines.push(`Only the user can decide how to go on: ask them, then run enki outcome ${id} <outcome> --by user, or stop the task.`)
-    } else if (result.reason.startsWith('the plan can\'t')) {
-      lines.push(`Send it back with what's missing: enki resume ${id} --note "<what to fix>". Don't fix the plan yourself.`)
+    } else if (result.reason.startsWith('the plan can\'t') || result.reason.startsWith('the spec can\'t')) {
+      lines.push(`Send it back with what's missing: enki resume ${id} --note "<what to fix>". Don't fix the ${result.reason.startsWith('the spec') ? 'spec' : 'plan'} yourself.`)
     } else if (readWorkflowSnapshot(task.taskDir).nodes.find(node => node.id === id)?.kind === 'verify') {
       lines.push(`The tests failed, and this workflow sends failing tests nowhere, so the run waits. You can't fix code. If every failure already failed at the baseline: enki resume ${id} --note "known failures", then enki verify ${id} --known-failures. Otherwise tell the user what failed and let them decide: enki outcome ${id} pass --by user to go on anyway, or stop the task.`)
-    } else if (teamOf(task)[id]?.capabilities.plans) {
+    } else if (teamOf(task)[id]?.capabilities.plans || teamOf(task)[id]?.capabilities.specs) {
       lines.push(`${id} has questions only the user can answer: ${join(task.taskDir, task.run.steps[id].report ?? '')}. Ask the user them with AskUserQuestion, as written. Add their answers to request.md in their own words, then: enki resume ${id} --note "answers added to request.md". Don't answer for them.`)
     } else {
       lines.push(`Read its report, deal with what it needs, then send it back to work: enki resume ${id} --note "<what you did>". If it needs a decision only the user can make, ask them, then: enki outcome ${id} <outcome> --by user.`)
@@ -732,6 +805,8 @@ function routingText(task, id, outcome, result) {
     lines.push(`Outcome: ${outcome} → end.`)
   } else if (result.to[0] === 'approval') {
     lines.push(`Outcome: ${outcome} → approval.`)
+  } else if (result.to[0] === 'spec-approval') {
+    lines.push(`Outcome: ${outcome} → spec approval.`)
   } else {
     lines.push(`Outcome: ${outcome} → ${result.to.join(', ')}.`)
   }
@@ -751,12 +826,15 @@ function nextSummary(task) {
   }
   const running = Object.entries(task.run.steps).filter(([, step]) => step.status === 'running').map(([id]) => id)
   if (running.length > 0) lines.push(`Running: ${running.join(', ')}`)
-  const waiting = Object.entries(task.run.steps).filter(([id, step]) => step.status === 'queued' && !ready.includes(id) && id !== 'approval').map(([id]) => `${id} (${notReady(task.run, workflow, id)})`)
+  const waiting = Object.entries(task.run.steps).filter(([id, step]) => step.status === 'queued' && !ready.includes(id) && !APPROVALS.includes(id)).map(([id]) => `${id} (${notReady(task.run, workflow, id)})`)
   if (waiting.length > 0) lines.push(`Waiting: ${waiting.join('; ')}`)
   const handed = Object.entries(task.run.steps).filter(([, step]) => step.status === 'handed-off').map(([id, step]) => `${id} (${step.reason})`)
   if (handed.length > 0) lines.push(`With you: ${handed.join(', ')}`)
-  if (awaitingApproval(task.run)) {
-    lines.push(`Approval: the plan waits for the user. Present ${join(task.taskDir, planReport(task.run))} exactly as written: EnterPlanMode, then ExitPlanMode with the file's text, changing nothing. If they ask for changes: enki outcome approval changes --by user --note "<their words>"`)
+  const waitingFor = waitingApproval(task.run)
+  if (waitingFor === 'spec-approval') {
+    lines.push(`Spec approval: the spec waits for the user. Present ${join(task.taskDir, specReport(task.run))} exactly as written: EnterPlanMode, then ExitPlanMode with the file's text, changing nothing. If they ask for changes: enki outcome spec-approval changes --by user --note "<their words>"`)
+  } else if (waitingFor === 'approval') {
+    lines.push(`Approval: the plan waits for the user. Present ${join(task.taskDir, planReport(task.run))} exactly as written: EnterPlanMode, then ExitPlanMode with the file's text, changing nothing. If they ask for changes, decide from their words whether they change how it's built (the plan) or what is built (the spec), tell them which, and ask when you can't tell: enki outcome approval change-plan --by user --note "<their words>", or enki outcome approval change-spec --by user --note "<their words>"`)
   }
   return lines.join('\n')
 }
@@ -864,6 +942,7 @@ export async function ask({ root, slug, role, briefPath, report, step, timeout }
   }
   // Whether the workflow has work for it comes first: an agent not yet started may not be needed.
   if (graph) {
+    requireSpecWorkflow(task, readWorkflowSnapshot(task.taskDir))
     const why = notReady(task.run, readWorkflowSnapshot(task.taskDir), role)
     if (why && task.run.steps[role]?.status !== 'running') throw new EnkiError(`${why[0].toUpperCase()}${why.slice(1)}. See what's ready with: enki next`)
   }
@@ -879,8 +958,8 @@ export async function ask({ root, slug, role, briefPath, report, step, timeout }
   if (graph) {
     const why = notReady(task.run, readWorkflowSnapshot(task.taskDir), role)
     if (why) throw new EnkiError(`${why[0].toUpperCase()}${why.slice(1)}. See what's ready with: enki next`)
-    if (entry.capabilities.blind && !hasReport(task, 'requirements.md')) {
-      throw new EnkiError(`The ${role} works from requirements.md, and it doesn't exist yet: enki writes it from the approved plan's "## Requirements" section.`)
+    if (entry.capabilities.blind && !hasReport(task, 'spec.md') && !hasReport(task, 'requirements.md')) {
+      throw new EnkiError(`The ${role} works from spec.md, and it doesn't exist yet: enki writes it when the user approves the spec.`)
     }
     if (phasesOf(readWorkflowSnapshot(task.taskDir)).before.has(role) && !hasReport(task, 'request.md')) {
       throw new EnkiError(`Write the user's request to ${join(task.taskDir, 'request.md')} first, in their own words: the steps before the plan work from it.`)
@@ -1069,6 +1148,7 @@ export function next({ root, slug }) {
     return 'This task was approved before workflows: follow the fixed flow in the execute skill.'
   }
   const workflow = readWorkflowSnapshot(task.taskDir)
+  requireSpecWorkflow(task, workflow)
   const lines = [`Workflow: ${workflow.name ?? workflow.id}`]
   for (const id of readySteps(task.run, workflow)) {
     const step = task.run.steps[id]
@@ -1079,12 +1159,14 @@ export function next({ root, slug }) {
     }
     const from = step.inputs.map(input =>
       input.from === 'plan' ? 'the approved plan'
+        : input.from === 'spec' ? 'the approved spec (spec.md)'
+        : input.from === 'spec-approval' || (input.from === 'approval' && input.outcome === 'change-spec') ? `the user's requested changes to the spec${input.note ? ` ("${input.note}")` : ''}`
         : input.from === 'request' ? 'the user\'s request (request.md)'
           : input.from === 'orchestrator' ? `your note${input.note ? ` ("${input.note}")` : ''}`
             : input.from === 'approval' ? `the user's requested changes${input.note ? ` ("${input.note}")` : ''}`
               : `${input.from}: ${input.outcome}${input.report ? ` (${input.report})` : ''}`,
     )
-    const blind = teamOf(task)[id]?.capabilities.blind ? ' It is blind: brief it from requirements.md, never from other steps\' reports.' : ''
+    const blind = teamOf(task)[id]?.capabilities.blind ? ' It is blind: brief it from spec.md, never from other steps\' reports.' : ''
     lines.push(`- ${id}: ready, visit ${step.visits + 1}. Sent by ${from.join(', ')}.${blind} Brief it, then: enki ask ${id} <brief>`)
   }
   const summary = nextSummary(task)
@@ -1135,7 +1217,7 @@ export function overrideOutcome({ root, slug, step, outcome, by, note = null }) 
   if (by !== 'user') throw new EnkiError(`Choosing an outcome for a step is the user's decision. Ask them, then run: enki outcome ${step} ${outcome} --by user`)
   const task = requireTask(root, slug)
   if (!task.run?.steps[step]) throw new EnkiError(`"${step}" isn't a step of this task's workflow.`, EXIT.usage)
-  if (step === 'approval') return changePlan(task, outcome, note)
+  if (APPROVALS.includes(step)) return changeApproval(task, step, outcome, note)
   if (task.run.steps[step].status !== 'handed-off') throw new EnkiError(`${step} isn't with the orchestrator, so its outcome is its own to report.`)
   const workflow = readWorkflowSnapshot(task.taskDir)
   const node = workflow.nodes.find(item => item.id === step)
@@ -1146,27 +1228,58 @@ export function overrideOutcome({ root, slug, step, outcome, by, note = null }) 
   return settleStep(task.taskDir, step, { outcome, byUser: true, note }).text
 }
 
+/** Tasks that started before specs have no Spec approval: this enki can't take one through planning. */
+function requireSpecWorkflow(task, workflow) {
+  if (task.approved || task.phase === 'done' || workflow.nodes.some(node => node.kind === 'spec-approval')) return
+  throw new EnkiError(`Task ${task.slug} started before specs, and its plan isn't approved yet, so it can't go on. Abandon it (enki phase done --abandon) and start it again.`)
+}
+
+const busyError = (busy, what) =>
+  new EnkiError(`${busy.join(', ')} ${busy.length === 1 ? 'is' : 'are'} still working on the approved ${what}. Wait for ${busy.length === 1 ? 'it' : 'them'} first: enki wait ${busy[0]}`)
+
 /**
- * The user's changes to the plan go back to the planner, with their words. Before approval the plan
- * is just withdrawn; after it, every step after Approval stops where it is, and the new plan needs
- * its own approval.
+ * The user's changes, with their words. At Spec approval they go back to the spec writer. At
+ * Approval, changes to the plan go back to the planner, and changes to the spec to the spec writer,
+ * after which both are approved again. Whatever was approved is withdrawn first: every step after
+ * it stops where it is.
  */
-function changePlan(task, outcome, note) {
-  if (outcome !== 'changes') throw new EnkiError('The user approves a plan only by accepting the plan dialog (ExitPlanMode). What they can send back is: enki outcome approval changes --by user --note "<their words>"', EXIT.usage)
+function changeApproval(task, step, outcome, note) {
+  const spec = step === 'spec-approval'
+  const allowed = spec ? ['changes'] : ['change-plan', 'change-spec']
+  if (!allowed.includes(outcome)) {
+    throw new EnkiError(
+      spec
+        ? 'The user approves the spec only by accepting the plan dialog (ExitPlanMode). What they can send back is: enki outcome spec-approval changes --by user --note "<their words>"'
+        : 'The user approves a plan only by accepting the plan dialog (ExitPlanMode). What they can send back is changes to how it\'s built, or to what is built: enki outcome approval change-plan --by user --note "<their words>", or enki outcome approval change-spec --by user --note "<their words>"',
+      EXIT.usage,
+    )
+  }
   if (!note) throw new EnkiError('Pass the user\'s requested changes, in their words: --note "<their words>"', EXIT.usage)
   const workflow = readWorkflowSnapshot(task.taskDir)
-  const report = planReport(task.run)
-  if (!awaitingApproval(task.run)) {
+  const report = spec ? specReport(task.run) : planReport(task.run)
+  const waiting = waitingApproval(task.run) === step
+  if (spec && !waiting) {
+    throw new EnkiError(task.specApproved ? 'The spec is already approved. Changes to it now: enki outcome approval change-spec --by user --note "<their words>"' : 'There is no spec yet: the spec writer hasn\'t finished one. Pass the user\'s words to it in its brief instead.')
+  }
+  if (outcome === 'change-spec') {
+    if (!task.specApproved) throw new EnkiError('There is no approved spec yet. Pass the user\'s words to the spec writer in its brief instead.')
+    let busy = []
+    updateState(task.taskDir, current => {
+      busy = reopenSpec(current.run, workflow)
+    })
+    if (busy.length > 0) throw busyError(busy, task.approved ? 'plan' : 'spec')
+    recordEvent(task.taskDir, 'spec.reopened', { spec: task.run.spec ?? null, plan: report })
+  } else if (outcome === 'change-plan' && !waiting) {
     if (!task.approved) throw new EnkiError('There is no plan yet: the planner hasn\'t finished one. Pass the user\'s words to it in its brief instead.')
     let busy = []
     updateState(task.taskDir, current => {
       busy = reopenPlan(current.run, workflow)
     })
-    if (busy.length > 0) throw new EnkiError(`${busy.join(', ')} ${busy.length === 1 ? 'is' : 'are'} still working on the approved plan. Wait for ${busy.length === 1 ? 'it' : 'them'} first: enki wait ${busy[0]}`)
+    if (busy.length > 0) throw busyError(busy, 'plan')
     recordEvent(task.taskDir, 'plan.reopened', { plan: report })
   }
-  recordEvent(task.taskDir, 'step.overridden', { step: 'approval', outcome, by: 'user', note })
-  return settleStep(task.taskDir, 'approval', { outcome, byUser: true, note, report }).text
+  recordEvent(task.taskDir, 'step.overridden', { step, outcome, by: 'user', note })
+  return settleStep(task.taskDir, step, { outcome, byUser: true, note, report }).text
 }
 
 // Dev servers. Agents never touch these directly: enki runs each one in its own tab.
@@ -1245,7 +1358,7 @@ async function startServer(task, config, repo) {
   const script = join(task.taskDir, `server-${repo.name.replaceAll('/', '-')}.sh`)
   const env = { ...(repo.port ? { PORT: String(repo.port) } : {}), ...task.env?.[repo.name] }
   const exports = Object.entries(env).map(([key, value]) => `export ${key}='${String(value).replaceAll("'", "'\\''")}'`)
-  const command = repo.port ? fill(devServer.start, { ...portValues(task), port: repo.port }) : devServer.start
+  const command = repo.port ? fill(devServer.start, { ...portValues(task, config), port: repo.port }) : devServer.start
   writeFileSync(script, `${[...exports, command].join('\n')}\n`)
   await herdr.runInPane(rootPane, `sh '${script}'`)
   if (!(await poll(() => responds(repo.url), config.timeouts.server))) {
@@ -1309,8 +1422,9 @@ export async function serverCommand({ root, slug, action, repoName }) {
 }
 
 const NEXT_STEP = {
-  intake: 'Brief the steps enki next names, and relay the planner\'s questions to the user. Skill: enki:task',
-  planning: 'Present the planner\'s plan exactly as written, with EnterPlanMode and ExitPlanMode. Skill: enki:task',
+  intake: 'Brief the steps enki next names, and relay the spec writer\'s questions to the user. Skill: enki:task',
+  spec: 'Present the spec writer\'s spec exactly as written, with EnterPlanMode and ExitPlanMode. Skill: enki:task',
+  planning: 'Brief the planner, relay its questions, then present its plan exactly as written, with EnterPlanMode and ExitPlanMode. Skill: enki:task',
   approved: 'Run enki team start, then the baseline. Skill: enki:execute',
   baseline: 'Baseline running. Skill: enki:execute',
   coding: 'The workflow is running: enki next says what to brief. Skill: enki:execute',
@@ -1341,7 +1455,7 @@ export async function status({ root, slug }) {
     `Scope: ${task.scope.join(', ') || 'none'}  Repos: ${task.repos.map(repo => `${repo.name}${repo.url ? ` (${repo.url})` : ''}`).join(', ')}`,
     ...(task.continues?.slug ? [`Continues task ${task.continues.slug}: ${task.continues.taskDir}`] : []),
     ...(task.worktrees ?? []).map(tree => `Branch: ${tree.branch}, ${tree.continued ? `continued from ${tree.base.commit.slice(0, 7)}` : `from ${tree.base.branch}`}, in ${tree.path}`),
-    ...task.repos.filter(repo => repo.memoryDir).map(repo => `Memory for ${repo.name}: ${repo.memoryDir}`),
+    ...task.repos.filter(repo => repo.memoryDir).map(repo => `Memory for ${repo.name}: ${repo.memoryDir}${mapIsEmpty(repo.memoryDir) ? ' (no map yet: build one with a task on --workflow map)' : ''}${unmappedNotes(repo.memoryDir).filter(note => !note.empty).map(note => ` (${note.path}: notes to fold into the map)`).join('')}`),
     ...(task.database ? [`Database: ${task.database}`] : []),
     `Tests since the last change: ${currentVerify(task) ? (task.verify.passed ? 'passed' : task.verify.accepted ? 'accepted' : 'failed') : 'not run'}`,
     ...(await agentSummary(task)),
@@ -1375,8 +1489,8 @@ export async function setPhase({ root, slug, phase, abandon = false }) {
     if (phase === task.phase) return { phase, notes: [] }
     throw new EnkiError(
       task.approved
-        ? 'The plan is approved. To change it, the user\'s words go back to the planner: enki outcome approval changes --by user --note "<their words>"'
-        : 'The workflow sets this phase: the plan goes to the user when the planner reports ready. See: enki next',
+        ? 'The plan is approved. To change it, the user\'s words go back: enki outcome approval change-plan (or change-spec, for what is built) --by user --note "<their words>"'
+        : 'The workflow sets this phase: the spec and the plan go to the user when their steps report ready. See: enki next',
     )
   }
   const intake = agentSteps(teamOf(task)).filter(id => teamOf(task)[id].intake)
@@ -1388,8 +1502,10 @@ export async function setPhase({ root, slug, phase, abandon = false }) {
     const missing = missingChecks(task)
     if (missing.length > 0) throw new EnkiError(`This task can't finish yet. Still needed: ${missing.join('; ')}.`)
   }
+  // Leaving the notes step: the maps it updated have to hold together.
+  const warnings = !abandon && PHASES.indexOf(phase) > PHASES.indexOf('notes') ? mapCheck(task) : []
   // Finishing commits the work first. If that fails, the task isn't done, and stays as it was.
-  const notes = phase === 'done' ? await finishTask(task, abandon) : []
+  const notes = [...warnings, ...(phase === 'done' ? await finishTask(task, abandon) : [])]
   if (abandon) recordEvent(task.taskDir, 'task.abandoned', { from: task.phase, missing: missingChecks(task) })
   updateState(task.taskDir, current => {
     current.phase = phase
@@ -1410,9 +1526,22 @@ export async function setPhase({ root, slug, phase, abandon = false }) {
 async function finishTask(task, abandon) {
   const config = loadTaskConfig(task)
   const notes = await serverCleanup(task)
+  // A map task folded the old notes into the map, and the orchestrator has read what was dropped.
+  if (!abandon && writesMap(teamOf(task))) {
+    for (const repo of task.repos.filter(item => hasMap(item.memoryDir))) {
+      const old = ['notes.md', 'notes'].filter(name => existsSync(join(repo.memoryDir, name)))
+      for (const name of old) rmSync(join(repo.memoryDir, name), { recursive: true, force: true })
+      if (old.length > 0) notes.push(`${repo.name}: removed the old notes (${old.join(', ')}), now folded into the map.`)
+    }
+  }
+  // Notes folded into the map are emptied by the orchestrator, which can't delete files.
+  for (const repo of abandon ? [] : task.repos) {
+    for (const note of unmappedNotes(repo.memoryDir).filter(item => item.empty)) rmSync(join(repo.memoryDir, note.path))
+  }
   if (task.worktrees?.length > 0) {
-    const requirementsPath = join(task.taskDir, 'requirements.md')
-    const message = commitMessage({ slug: task.slug, id: task.id, requirements: existsSync(requirementsPath) ? readFileSync(requirementsPath, 'utf8') : null, abandon })
+    // Tasks from before specs have requirements.md instead.
+    const specPath = ['spec.md', 'requirements.md'].map(name => join(task.taskDir, name)).find(path => existsSync(path))
+    const message = commitMessage({ slug: task.slug, id: task.id, requirements: specPath ? readFileSync(specPath, 'utf8') : null, abandon })
     let results
     try {
       results = finishWorktrees({ worktrees: task.worktrees, repos: task.repos, message, branch: task.branch ?? task.slug, abandon })
@@ -1445,7 +1574,7 @@ async function finishTask(task, abandon) {
   }
   if (task.databaseReady) {
     try {
-      dropDatabase(config.database, portValues(task), task.projectRoot)
+      dropDatabase(config.database, portValues(task, config), task.projectRoot)
       notes.push('Dropped the task\'s database copy.')
     } catch (error) {
       notes.push(`The database copy wasn't dropped: ${error.message}`)
@@ -1515,15 +1644,16 @@ function approvedWorkflow(task, { workflow: chosen, skip, tests, qa }, steps) {
   return { workflow, problems, fresh }
 }
 
-/** The plan's `## Requirements` section: all the blind steps get. */
-export function requirementsOf(plan) {
-  const match = /^(#{1,3})\s+Requirements\s*$/im.exec(plan)
-  if (!match) return null
-  // The section runs to the next heading of its own level or higher: its own subsections stay in.
-  const rest = plan.slice(match.index + match[0].length)
-  const end = new RegExp(`^#{1,${match[1].length}}\\s+\\S`, 'm').exec(rest)
-  const body = (end ? rest.slice(0, end.index) : rest).trim()
-  return body || null
+/** The sections the tester and QA can't work without. */
+const SPEC_SECTIONS = ['Goal', 'Acceptance criteria', 'Public interface']
+
+/** Why a spec step's report can't go to the user as the spec, or nothing. */
+function specProblems(state, report) {
+  const path = report ? join(state.taskDir, report) : null
+  if (!path || !existsSync(path)) return [`there's no spec at ${path ?? 'its report'}`]
+  const text = readFileSync(path, 'utf8')
+  const missing = SPEC_SECTIONS.filter(name => !new RegExp(`^#{1,3}\\s+${name}\\s*$`, 'im').test(text))
+  return missing.length ? [`it has no ${missing.map(name => `"## ${name}"`).join(', ')} section${missing.length > 1 ? 's' : ''}`] : []
 }
 
 /** Why a planning step's report can't go to the user as the plan, or nothing. */
@@ -1534,7 +1664,6 @@ function planProblems(state, report) {
   const problems = []
   const steps = parseSteps(text)
   if (steps.length === 0) problems.push('it has no Steps list ("1. [Coder] ...", one owner per step)')
-  if (!requirementsOf(text)) problems.push('it has no "## Requirements" section for the steps that judge the work blind')
   const scope = readApprovedScope(text)
   const flow = approvedWorkflow(state, scope, steps)
   problems.push(...flow.problems)
@@ -1548,6 +1677,26 @@ function planProblems(state, report) {
   return problems.map(problem => problem.replace(/\s*\n\s*/g, ' '))
 }
 
+/** Called only by the ExitPlanMode hook, which only fires after the user approves: the spec, saved for every step after. */
+export function approveSpec(task, specText) {
+  const problem = planCheck(task, specText)
+  if (problem) throw new EnkiError(problem)
+  if (waitingApproval(task.run) !== 'spec-approval') throw new EnkiError('No spec is waiting for approval.')
+  const report = specReport(task.run)
+  const workflow = readWorkflowSnapshot(task.taskDir)
+  writeFileSync(join(task.taskDir, 'spec.md'), specText.endsWith('\n') ? specText : `${specText}\n`)
+  updateState(task.taskDir, current => {
+    current.run.spec = report
+    routeOutcome(current.run, workflow, 'spec-approval', 'approved', { report })
+    current.run.steps['spec-approval'].inputs = []
+    current.specApproved = true
+    current.phase = 'planning'
+  })
+  recordEvent(task.taskDir, 'spec.approved', { spec: report })
+  recordEvent(task.taskDir, 'step.outcome', { step: 'spec-approval', outcome: 'approved', to: targetsOf(edgeFor(workflow, 'spec-approval', 'approved')), by: 'user' })
+  return readState(task.taskDir)
+}
+
 /** Called only by the ExitPlanMode hook, which only fires after the user approves. */
 export function approvePlan(task, planText) {
   if (!task.run) return approveLegacyPlan(task, planText)
@@ -1558,8 +1707,6 @@ export function approvePlan(task, planText) {
   const { scope, tests, qa, database } = scopeLines
   const steps = parseSteps(planText)
   writeFileSync(join(task.taskDir, 'approved-plan.md'), planText)
-  const requirements = requirementsOf(planText)
-  if (requirements) writeFileSync(join(task.taskDir, 'requirements.md'), `# Requirements\n\n${requirements}\n`)
   const mode = planDatabase(loadTaskConfig(task).database, database)
   const flow = approvedWorkflow(task, scopeLines, steps)
   const runnable = flow.problems.length === 0

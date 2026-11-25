@@ -1,0 +1,30 @@
+{
+  "id": "map",
+  "name": "Map",
+  "description": "Builds a repo's codebase map, folding its old notes in: the scout surveys the code and the notes, the spec writer sets out what to map for your approval, the planner outlines every map file for your approval, and the mapper writes the map one top-level area per visit. No code changes, no tests.",
+  "version": 3,
+  "nodes": [
+    {"id": "start", "kind": "start"},
+    {"id": "scout", "agent": "scout"},
+    {"id": "spec-writer", "agent": "spec-writer"},
+    {"id": "spec-approval", "kind": "spec-approval"},
+    {"id": "planner", "agent": "planner"},
+    {"id": "approval", "kind": "approval"},
+    {"id": "mapper", "agent": "mapper"},
+    {"id": "end", "kind": "end"}
+  ],
+  "edges": [
+    {"from": "start", "on": "request", "to": "scout"},
+    {"from": "scout", "on": "done", "to": "spec-writer"},
+    {"from": "spec-writer", "on": "ready", "to": "spec-approval"},
+    {"from": "spec-approval", "on": "approved", "to": "planner"},
+    {"from": "spec-approval", "on": "changes", "to": "spec-writer"},
+    {"from": "planner", "on": "ready", "to": "approval"},
+    {"from": "planner", "on": "spec", "to": "spec-writer"},
+    {"from": "approval", "on": "approved", "to": "mapper"},
+    {"from": "approval", "on": "change-plan", "to": "planner"},
+    {"from": "approval", "on": "change-spec", "to": "spec-writer"},
+    {"from": "mapper", "on": "more", "to": "mapper", "max": 40},
+    {"from": "mapper", "on": "done", "to": "end"}
+  ]
+}

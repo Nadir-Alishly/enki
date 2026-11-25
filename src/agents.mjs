@@ -10,23 +10,25 @@ import { pluginRoot } from './paths.mjs'
 import { parseSkill } from './skills.mjs'
 import { enkiHome } from './state.mjs'
 
-/** What a role may write: only its own reports, test files only, code but not tests, or both. */
-export const WRITE_LEVELS = ['none', 'tests', 'code', 'all']
+/** What a role may write: only its own reports, test files only, code but not tests, both, or only the task's codebase map. */
+export const WRITE_LEVELS = ['none', 'tests', 'code', 'all', 'map']
 /** Outcomes enki raises itself. A role can't declare or report them. */
 export const ENGINE_OUTCOMES = ['timeout', 'error']
 /** Step ids a workflow can't give a role: targets and built-in steps. */
-export const RESERVED_IDS = new Set(['orchestrator', 'start', 'approval', 'end', 'verify', 'otherwise', 'user', 'request', 'plan'])
+export const RESERVED_IDS = new Set(['orchestrator', 'start', 'spec-approval', 'approval', 'end', 'verify', 'otherwise', 'user', 'request', 'spec', 'plan'])
 
 export const ROLE_ID = /^[a-z][a-z0-9-]{0,30}$/
 const OUTCOME_ID = /^[a-z][a-z0-9-]{0,30}$/
 // color and pattern came from before types: still read, never used.
 const ROLE_KEYS = new Set(['id', 'name', 'type', 'color', 'pattern', 'capabilities', 'outcomes', 'model', 'effort', 'timeout', 'skills'])
-const CAPABILITY_KEYS = new Set(['write', 'blind', 'browser', 'server', 'plans'])
-const FLAGS = ['blind', 'browser', 'server', 'plans']
+const CAPABILITY_KEYS = new Set(['write', 'blind', 'browser', 'server', 'specs', 'plans'])
+const FLAGS = ['blind', 'browser', 'server', 'specs', 'plans']
 
 /** What kind of agent it is. The type decides how it looks, and the project's charts count by it. */
 export const AGENT_TYPES = {
   scout: { name: 'Scout', color: '#9d9dff', pattern: 'stripes' },
+  // The spec writer shares the planner's color, as the two write what the user approves: cross-striped.
+  spec: { name: 'Spec writer', color: '#9d9dff', pattern: 'cross' },
   planner: { name: 'Planner', color: '#9d9dff', pattern: null },
   coder: { name: 'Coder', color: '#ffcd04', pattern: null },
   tester: { name: 'Tester', color: '#85af25', pattern: null },
@@ -43,9 +45,11 @@ export function typeOf(raw) {
   const id = raw?.id ?? raw?.role
   if (AGENT_TYPES[id]) return id
   const caps = raw?.capabilities ?? {}
+  if (caps.specs) return 'spec'
   if (caps.plans) return 'planner'
   if (['code', 'all'].includes(caps.write)) return 'coder'
   if (caps.write === 'tests') return 'tester'
+  if (caps.write === 'map') return 'scout' // It explores the code to write the map.
   if (caps.browser) return 'qa'
   return raw?.pattern === 'stripes' ? 'scout' : 'reviewer'
 }
@@ -82,6 +86,8 @@ export function roleProblems(raw) {
       if (caps[key] !== undefined && typeof caps[key] !== 'boolean') problems.push(`capabilities.${key}: true or false`)
     }
     if (caps.plans === true && caps.write !== 'none') problems.push('capabilities.plans: a role that plans writes nothing but its plan (write: "none")')
+    if (caps.specs === true && caps.write !== 'none') problems.push('capabilities.specs: a role that writes the spec writes nothing else (write: "none")')
+    if (caps.specs === true && caps.plans === true) problems.push('capabilities: a role writes the spec or the plan, not both')
   }
   if (!Array.isArray(raw.outcomes) || raw.outcomes.length === 0) problems.push('outcomes: at least one')
   else {
@@ -112,6 +118,7 @@ export function agentWarnings(raw) {
   if (caps.server && !caps.browser) warnings.push('it starts the dev server but has no browser to look at it')
   if (caps.blind && ['code', 'all'].includes(caps.write)) warnings.push('it is blind but writes code: it can\'t see the code it changes')
   if (caps.blind && caps.plans) warnings.push('it is blind but plans: it can\'t see the code it plans for')
+  if (caps.blind && caps.specs) warnings.push('it is blind but writes the spec: it can\'t check the spec against the code')
   if ((raw?.outcomes ?? []).some(outcome => !outcome?.description)) warnings.push('an outcome has no description: the agent is told only its name')
   return warnings
 }
@@ -136,7 +143,7 @@ export function readRole(dir, source) {
     type,
     color: AGENT_TYPES[type].color,
     pattern: AGENT_TYPES[type].pattern,
-    capabilities: { blind: false, browser: false, server: false, plans: false, ...raw.capabilities },
+    capabilities: { blind: false, browser: false, server: false, specs: false, plans: false, ...raw.capabilities },
     description: skill.description,
     dir,
     skillPath,

@@ -7,8 +7,9 @@ import { basename, join } from 'node:path'
 import { promisify } from 'node:util'
 import { DEFAULTS } from '../src/config.mjs'
 import { AGENT_TYPES, hasTeam, LEGACY_TEAM, teamOf, typeOf } from '../src/agents.mjs'
-import { awaitingApproval, notReady, phasesOf, readWorkflowSnapshot, runEnded } from '../src/workflow.mjs'
-import { loadProjectConfig } from '../src/memory.mjs'
+import { notReady, phasesOf, readWorkflowSnapshot, runEnded, waitingApproval } from '../src/workflow.mjs'
+import { loadProjectConfig, readMainMemoryTree } from '../src/memory.mjs'
+import { mapGraph } from '../src/map.mjs'
 import { enkiHome, listTasks, readEvents } from '../src/state.mjs'
 import { git, goalOf } from '../src/worktrees.mjs'
 
@@ -57,9 +58,10 @@ function readLines(path) {
     })
 }
 
+// Tasks from before specs have requirements.md instead.
 const requirementsGoal = task => {
-  const path = join(task.taskDir, 'requirements.md')
-  return existsSync(path) ? goalOf(readFileSync(path, 'utf8')) : null
+  const path = ['spec.md', 'requirements.md'].map(name => join(task.taskDir, name)).find(existsSync)
+  return path ? goalOf(readFileSync(path, 'utf8')) : null
 }
 
 /** The goal's first sentence: the goal itself can be a paragraph. */
@@ -78,7 +80,9 @@ const byName = agents => new Map((agents ?? []).filter(agent => agent.name).map(
 function stepStyles(task) {
   const styles = { orchestrator: { label: 'Orchestrator', role: 'orchestrator', color: null, pattern: null } }
   for (const [id, entry] of Object.entries(teamOf(task))) {
-    styles[id] = { label: id === entry.role ? entry.name : `${entry.name}: ${id}`, name: entry.name, role: entry.role, color: entry.color ?? null, pattern: entry.pattern ?? null }
+    // The type decides the look, now: a task started before a type's look changed shows the new one.
+    const look = AGENT_TYPES[typeOf(entry)]
+    styles[id] = { label: id === entry.role ? entry.name : `${entry.name}: ${id}`, name: entry.name, role: entry.role, color: look.color, pattern: look.pattern }
   }
   return styles
 }
@@ -111,12 +115,13 @@ function workflowView(task, styles, cards = []) {
   }
   const steps = task.run.steps
   const { before } = phasesOf(workflow)
-  const BUILTIN_LABELS = { start: 'Start', approval: 'Approval', end: 'End', verify: 'Tests' }
-  // Start has always passed the request on; Approval waits for the user; End is reached or not.
+  const BUILTIN_LABELS = { start: 'Start', 'spec-approval': 'Spec approval', approval: 'Approval', end: 'End', verify: 'Tests' }
+  // Start has always passed the request on; the approvals wait for the user; End is reached or not.
   const statusOf = node => {
     if (node.kind === 'start') return 'done'
     if (node.kind === 'end') return task.run.endReached ? 'done' : 'idle'
-    if (node.kind === 'approval') return awaitingApproval(task.run) ? 'waiting' : task.approved ? 'done' : 'idle'
+    if (node.kind === 'spec-approval') return waitingApproval(task.run) === 'spec-approval' ? 'waiting' : task.specApproved || task.approved ? 'done' : 'idle'
+    if (node.kind === 'approval') return waitingApproval(task.run) === 'approval' ? 'waiting' : task.approved ? 'done' : 'idle'
     return steps[node.id]?.status ?? 'idle'
   }
   return {
@@ -133,7 +138,7 @@ function workflowView(task, styles, cards = []) {
         label: node.kind ? (BUILTIN_LABELS[node.kind] ?? node.kind) : labelOf(styles, node.id),
         phase: node.kind && node.kind !== 'verify' ? null : before.has(node.id) ? 'before' : 'after',
         status: statusOf(node),
-        ready: step && !node.kind?.match(/^(approval)$/) ? !notReady(task.run, workflow, node.id) : false,
+        ready: step && !node.kind?.match(/^(spec-approval|approval)$/) ? !notReady(task.run, workflow, node.id) : false,
         visits: step?.visits ?? 0,
         outcome: step?.outcome ?? null,
         reason: step?.reason ?? null,
@@ -253,8 +258,10 @@ function feedLine(event, styles) {
   switch (event.type) {
     case 'step.outcome':
       if (d.intake) return null
-      if (d.step === 'approval') return ['orchestrator', d.outcome === 'approved' ? 'the user approved the plan' : 'the user asked for changes to the plan']
+      if (d.step === 'spec-approval') return ['orchestrator', d.outcome === 'approved' ? 'the user approved the spec' : 'the user asked for changes to the spec']
+      if (d.step === 'approval') return ['orchestrator', d.outcome === 'approved' ? 'the user approved the plan' : d.outcome === 'change-spec' ? 'the user asked for changes to the spec, when they saw the plan' : 'the user asked for changes to the plan']
       if (d.by === 'user') return [d.step, `goes on as "${d.outcome}", the user's decision`]
+      if (d.to?.[0] === 'spec-approval') return [d.step, 'wrote the spec: it waits for the user\'s approval']
       if (d.to?.[0] === 'approval') return [d.step, 'wrote the plan: it waits for the user\'s approval']
       return [d.step, d.to?.[0] === 'orchestrator' ? `reported "${d.outcome}"` : `reported "${d.outcome}" → ${d.to.map(target => (target === 'end' ? 'the end' : label(target))).join(', ')}`]
     case 'step.handed_off':
@@ -330,7 +337,8 @@ function alerts(task, events, cards) {
     if (step.reason?.startsWith('limit')) list.push({ kind: 'warning', word: 'Needs you:', text: `${who} reached a loop limit. Only you can decide how to go on: tell the orchestrator.` })
     else list.push({ kind: 'warning', word: 'With the orchestrator:', text: `${who} handed its work over (${step.reason}).` })
   }
-  if (task.phase !== 'done' && awaitingApproval(task.run)) list.push({ kind: 'warning', word: 'Needs you:', text: 'The plan is ready for your approval, in the orchestrator’s terminal.' })
+  const waiting = task.phase !== 'done' ? waitingApproval(task.run) : null
+  if (waiting) list.push({ kind: 'warning', word: 'Needs you:', text: `The ${waiting === 'spec-approval' ? 'spec' : 'plan'} is ready for your approval, in the orchestrator’s terminal.` })
   const lastCommitFailure = events.findLast(event => event.type === 'worktree.commit_failed')
   if (lastCommitFailure && task.phase !== 'done') list.push({ kind: 'danger', word: 'Error:', text: 'The final commit failed. A git hook may have refused it.' })
   return list
@@ -407,6 +415,12 @@ function repoBranches(project) {
   } catch {
     return []
   }
+}
+
+/** The Map page: each repo's codebase map on its checked-out branch, as a graph. */
+export function projectMap(project) {
+  const repos = loadProjectConfig(project.root).repos.map(repo => ({ name: repo.name, files: readMainMemoryTree(project.root, repo, 'map') }))
+  return { name: project.name, branches: repoBranches(project), ...mapGraph(project.name, repos) }
 }
 
 /** Everything for the project view: tasks, a year of finished tasks, 90 days of tokens by role. */

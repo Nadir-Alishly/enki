@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { MCP_VERSION } from '../../src/playwright.mjs'
+import { APPROVALS } from '../../src/workflow.mjs'
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
 const enkiBin = join(repoRoot, 'bin/enki')
@@ -12,16 +13,13 @@ const fakeHerdr = join(repoRoot, 'tests/helpers/fake-herdr.mjs')
 
 /** A stand-in for `enki playwright install`, so team starts don't need the network. */
 const DEFAULT_STEPS = ['1. [Scout] Explore', '2. [Tester] Write tests', '3. [Coder] Implement', '4. [QA] Check by hand', '5. [Reviewer] Review', '6. [Orchestrator] Report'].join('\n')
-const DEFAULT_REQUIREMENTS = '## Requirements\n\nThe work.\n'
+/** A spec as the spec writer would write it, with the sections enki needs before it goes to the user. */
+export const DEFAULT_SPEC = '# Spec\n\n## Goal\n\nThe work.\n\n## Acceptance criteria\n\n1. It works.\n\n## Public interface\n\nNone.\n'
 
-/**
- * A plan as the planner would write it: plans without steps get a default list, and plans without
- * requirements a default section, unless the test is about that.
- */
+/** A plan as the planner would write it: plans without steps get a default list, unless the test is about that. */
 export function fullPlan(plan, { steps = true } = {}) {
   let text = plan
   if (steps && !/\[[a-z][\w-]*\]/i.test(text)) text = `${text}\n${DEFAULT_STEPS}`
-  if (!/^#{1,3}\s+Requirements\s*$/im.test(text)) text = `${text}\n\n${DEFAULT_REQUIREMENTS}`
   return text
 }
 const DEFAULT_STEP = { tester: '2', coder: '3', qa: '4', reviewer: '5' }
@@ -137,9 +135,10 @@ export function makeProject(rawConfig = {}) {
 
   /**
    * Runs the steps before the plan with the real commands until the plan waits for approval: the
-   * scout reports, and the planner writes `plan` as its report. Returns the plan as written.
+   * scout reports, the spec writer writes `spec`, the user approves it through the real hook, and
+   * the planner writes `plan` as its report. Returns the plan as written.
    */
-  const planReady = (plan = '# Plan\n', extraEnv = {}, { steps = true } = {}) => {
+  const planReady = (plan = '# Plan\n', extraEnv = {}, { steps = true, spec = DEFAULT_SPEC, until = 'plan' } = {}) => {
     const text = fullPlan(plan, { steps })
     const task = boundTask(extraEnv)
     if (!task.run) {
@@ -151,10 +150,17 @@ export function makeProject(rawConfig = {}) {
     for (let turn = 0; turn < 10; turn++) {
       const current = JSON.parse(readFileSync(join(task.taskDir, 'state.json'), 'utf8'))
       if (current.run.steps.approval?.status === 'queued') return text
-      const queued = Object.keys(current.run.steps).filter(id => id !== 'approval' && current.run.steps[id].status === 'queued')
+      if (current.run.steps['spec-approval']?.status === 'queued') {
+        const result = hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: spec }, noAutoSteps: true }, extraEnv)
+        if (JSON.parse(readFileSync(join(task.taskDir, 'state.json'), 'utf8')).run.steps['spec-approval'].status === 'queued') throw new Error(`The spec wasn't approved: ${JSON.stringify(result)}`)
+        if (until === 'spec') return spec
+        continue
+      }
+      const queued = Object.keys(current.run.steps).filter(id => !APPROVALS.includes(id) && current.run.steps[id].status === 'queued')
       if (queued.length === 0) throw new Error(`The plan never reached approval: ${JSON.stringify(current.run.steps)}`)
       for (const id of queued) {
         if (current.team[id]?.capabilities.plans) writeFileSync(join(task.taskDir, `${id}-r${current.run.steps[id].visits + 1}.md`), text)
+        if (current.team[id]?.capabilities.specs) writeFileSync(join(task.taskDir, `${id}-r${current.run.steps[id].visits + 1}.md`), spec)
         const result = enki(['ask', id, path, '--task', task.slug], extraEnv)
         if (result.code !== 0 && !/waits for/.test(result.err)) throw new Error(`${id}: ${result.err}${result.out}`)
       }
@@ -162,9 +168,12 @@ export function makeProject(rawConfig = {}) {
     throw new Error('The plan never reached approval.')
   }
 
+  /** Runs the steps before the spec, approves the spec, and stops before the planning steps. */
+  const specApproved = (extraEnv = {}, spec = DEFAULT_SPEC) => planReady('', extraEnv, { spec, until: 'spec' })
+
   /** Runs the steps before the plan, then the same hook the real ExitPlanMode approval runs. */
-  const approve = (plan = '# Plan\n\nTeam: full\n', extraEnv = {}) => {
-    const text = planReady(plan, extraEnv)
+  const approve = (plan = '# Plan\n\nTeam: full\n', extraEnv = {}, { spec = DEFAULT_SPEC } = {}) => {
+    const text = planReady(plan, extraEnv, { spec })
     return hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: text } }, extraEnv)
   }
 
@@ -181,13 +190,13 @@ export function makeProject(rawConfig = {}) {
    */
   const runWorkflow = (slug = 'demo', extraEnv = {}) => {
     const dir = taskDir(slug)
-    if (!existsSync(join(dir, 'requirements.md'))) writeFileSync(join(dir, 'requirements.md'), '# Requirements\n\n## Goal\n\nThe work.\n')
+    if (!existsSync(join(dir, 'spec.md'))) writeFileSync(join(dir, 'spec.md'), DEFAULT_SPEC)
     const path = brief(`brief-${slug}.md`)
     for (let turn = 0; turn < 20; turn++) {
       const run = state(slug).run
       const workflow = JSON.parse(readFileSync(join(dir, 'workflow.json'), 'utf8'))
       if (!run) throw new Error('This task has no workflow run.')
-      const queued = Object.keys(run.steps).filter(id => id !== 'approval' && run.steps[id].status === 'queued')
+      const queued = Object.keys(run.steps).filter(id => !APPROVALS.includes(id) && run.steps[id].status === 'queued')
       if (queued.length === 0) return
       let moved = false
       for (const id of queued) {
@@ -203,7 +212,7 @@ export function makeProject(rawConfig = {}) {
     throw new Error('The workflow did not end in 20 turns.')
   }
 
-  return { base, root, env, fakeBrowser, herdr, enki, hook, taskDir, state, events, brief, planReady, approve, report, asWorker, git, runWorkflow, write: writeFileSync }
+  return { base, root, env, fakeBrowser, herdr, enki, hook, taskDir, state, events, brief, planReady, specApproved, approve, report, asWorker, git, runWorkflow, write: writeFileSync }
 }
 
 function readdirNames(dir) {

@@ -8,10 +8,10 @@ import { EFFORTS, ROLES } from '../src/config.mjs'
 import { modelCatalog } from './models.mjs'
 import { loadProjectConfig } from '../src/memory.mjs'
 import { libraryDir, loadRoles, roleInstructions } from '../src/agents.mjs'
-import { BUILTIN_STEPS, describeWorkflow, loadWorkflows, upgradeWorkflow, workflowProblems, workflowWarnings } from '../src/workflow.mjs'
+import { BUILTIN_STEPS, describeWorkflow, loadWorkflows, stripLoaded, upgradeWorkflow, workflowProblems, workflowWarnings } from '../src/workflow.mjs'
 import { projectSkills, SettingsError } from './settings.mjs'
 
-const strip = ({ source, path, ...workflow }) => workflow
+const strip = stripLoaded
 // Enki's own roles first, in their usual order, then the rest.
 const order = id => (ROLES.includes(id) ? ROLES.indexOf(id) : ROLES.length)
 

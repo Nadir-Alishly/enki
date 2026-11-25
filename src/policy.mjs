@@ -9,7 +9,7 @@ import { parseCommand, topLevelCommands, writeTargets } from './shell.mjs'
 
 const DEFAULT_POLICY = JSON.parse(readFileSync(new URL('../policy/default.json', import.meta.url), 'utf8'))
 
-/** Blind steps judge the result from the requirements, so they don't get to see how it was built. */
+/** Blind steps judge the result from the spec, so they don't get to see how it was built. */
 export const isBlindStep = (state, step) => Boolean(stepCapabilities(state, step)?.blind)
 
 const escape = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -27,7 +27,7 @@ function hiddenSteps(state) {
 
 const WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 const READ_TOOLS = new Set(['Read', 'NotebookRead'])
-const STATE_FILES = new Set(['state.json', 'events.jsonl', 'approved-plan.md', 'rules.md'])
+const STATE_FILES = new Set(['state.json', 'events.jsonl', 'spec.md', 'approved-plan.md', 'rules.md'])
 /** The task-folder files a step may write: its own, and for a step that writes tests, the test notes. */
 function reportPrefixes(ctx) {
   const write = stepCapabilities(ctx.state, ctx.role)?.write
@@ -99,9 +99,13 @@ function repoFor(ctx, path) {
 
 const MEMORY_FILES = new Set(['notes.md', 'repo.json', 'playbook.md'])
 
-/** The memory checkout of a repo in the bound task, if `path` is one of its files. */
+/** The memory checkout of a repo in the bound task, if `path` is one of its files, in its map, or a note still to fold into it. */
 const taskMemoryFile = (ctx, path) =>
-  (ctx.state?.repos ?? []).find(repo => repo.memoryDir && dirname(path) === repo.memoryDir && MEMORY_FILES.has(basename(path)))
+  (ctx.state?.repos ?? []).find(repo => repo.memoryDir && ((dirname(path) === repo.memoryDir && MEMORY_FILES.has(basename(path))) || ['map', 'unmapped'].some(name => isInside(path, join(repo.memoryDir, name)))))
+
+/** Is `path` in the main tree's memory of one of the task's repos: a memory file, or its map? */
+const mainMemoryFile = (ctx, path) =>
+  (ctx.state?.repos ?? []).some(repo => repo.main && ((MEMORY_FILES.has(basename(path)) && dirname(path) === join(repo.main, '.enki')) || isInside(path, join(repo.main, '.enki', 'map'))))
 
 function orchestratorWrite(ctx, path) {
   const enkiDir = join(ctx.root, '.enki')
@@ -110,7 +114,7 @@ function orchestratorWrite(ctx, path) {
   if (taskMemoryFile(ctx, path)) return null
   if (isInside(path, join(enkiDir, 'memory'))) return 'Private memory is written only by enki. Edit your task\'s memory checkout instead (enki status shows it).'
   // During a task, the main tree's memory is the base branch's: changes go on the task's branch.
-  const mainMemory = ctx.state?.worktrees?.length > 0 && MEMORY_FILES.has(basename(path)) && (ctx.state?.repos ?? []).some(repo => repo.main && dirname(path) === join(repo.main, '.enki'))
+  const mainMemory = ctx.state?.worktrees?.length > 0 && mainMemoryFile(ctx, path)
   if (mainMemory) return 'That is the main tree\'s memory. During a task, write the task\'s copy instead (enki status shows it), so it reaches the base branch only through the merge.'
   if (isInside(path, join(enkiDir, 'worktrees'))) return 'The orchestrator never edits project files. Delegate this to the coder.'
   if (isInside(path, enkiDir)) {
@@ -134,6 +138,11 @@ function workerWrite(ctx, path) {
     const name = relative(state.taskDir, path).split(sep)[0].replace(/^\./, '')
     const allowed = reportPrefixes(ctx).some(prefix => name.startsWith(prefix))
     return allowed ? null : `${role} may only write its own reports in the task folder, not ${name}.`
+  }
+  // A step that writes the map writes nothing else: wherever memory lives, in the worktree or beside it.
+  if (stepCapabilities(state, role)?.write === 'map') {
+    const maps = state.repos.filter(repo => repo.memoryDir).map(repo => join(repo.memoryDir, 'map'))
+    return maps.some(dir => isInside(path, dir)) ? null : `The ${role} writes only the map${maps.length ? `, in ${maps.join(', ')}` : ''}. Put anything else in your report.`
   }
   // A task's own worktree lives under .enki, and is the only part of it a worker may write.
   if (isInside(path, join(ctx.root, '.enki')) && !repoFor(ctx, path)) {
@@ -186,9 +195,9 @@ function hiddenFrom(ctx, path) {
     const plan = /^(approved-plan|plan)\.md$/.test(inTask[0])
     const brief = inTask[0] === 'briefs' && steps.some(step => inTask.at(-1).includes(step))
     const hidden = own || plan || brief
-    return hidden ? `The ${ctx.role} works from requirements.md, so ${inTask.at(-1)} is hidden.` : null
+    return hidden ? `The ${ctx.role} works from spec.md, so ${inTask.at(-1)} is hidden.` : null
   }
-  return state.blindFiles?.includes(path) ? `The ${ctx.role} works from the requirements, so the coder's change to ${basename(path)} is hidden. Test what it does, not how it's written.` : null
+  return state.blindFiles?.includes(path) ? `The ${ctx.role} works from the spec, so the coder's change to ${basename(path)} is hidden. Test what it does, not how it's written.` : null
 }
 
 function bashRules(ctx) {

@@ -1,11 +1,13 @@
 {
   "id": "research",
   "name": "Research",
-  "description": "Answers a question about the code without changing it: the scout explores, the planner sets out what to find out, and a deeper read-only investigation follows the approved plan.",
-  "version": 2,
+  "description": "Answers a question about the code without changing it: the scout explores, the spec writer sets out the question for your approval, the planner sets out how to find out, and a deeper read-only investigation follows the approved plan.",
+  "version": 3,
   "nodes": [
     {"id": "start", "kind": "start"},
     {"id": "scout", "agent": "scout"},
+    {"id": "spec-writer", "agent": "spec-writer"},
+    {"id": "spec-approval", "kind": "spec-approval"},
     {"id": "planner", "agent": "planner"},
     {"id": "approval", "kind": "approval"},
     {"id": "investigate", "agent": "scout"},
@@ -13,10 +15,15 @@
   ],
   "edges": [
     {"from": "start", "on": "request", "to": "scout"},
-    {"from": "scout", "on": "done", "to": "planner"},
+    {"from": "scout", "on": "done", "to": "spec-writer"},
+    {"from": "spec-writer", "on": "ready", "to": "spec-approval"},
+    {"from": "spec-approval", "on": "approved", "to": "planner"},
+    {"from": "spec-approval", "on": "changes", "to": "spec-writer"},
     {"from": "planner", "on": "ready", "to": "approval"},
+    {"from": "planner", "on": "spec", "to": "spec-writer"},
     {"from": "approval", "on": "approved", "to": "investigate"},
-    {"from": "approval", "on": "changes", "to": "planner"},
+    {"from": "approval", "on": "change-plan", "to": "planner"},
+    {"from": "approval", "on": "change-spec", "to": "spec-writer"},
     {"from": "investigate", "on": "done", "to": "end"}
   ]
 }

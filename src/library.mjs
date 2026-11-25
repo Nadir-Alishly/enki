@@ -10,7 +10,7 @@ import { agentsDir, agentWarnings, libraryDir, loadRoles, roleProblems, typeOf }
 import { pluginRoot } from './paths.mjs'
 import { availableSkills } from './skills.mjs'
 import { writeJsonAtomic } from './state.mjs'
-import { capabilityWords, loadWorkflows, phasesOf, targetsOf, upgradeWorkflow, waitsFor, workflowProblems, workflowWarnings } from './workflow.mjs'
+import { capabilityWords, loadWorkflows, phasesOf, SPEC_ADDED_WARNING, stripLoaded, targetsOf, upgradeWorkflow, waitsFor, workflowProblems, workflowWarnings } from './workflow.mjs'
 
 export const EXPORT_FORMAT = 'enki-workflow'
 export const EXPORT_VERSION = 2
@@ -20,7 +20,7 @@ const ID = /^[a-z][a-z0-9-]{0,30}$/
 
 export class LibraryError extends Error {}
 
-const strip = ({ source, path, ...workflow }) => workflow
+const strip = stripLoaded
 
 /** Where `--to` puts a workflow: the machine's library, or the project's own folder. Agents always go to the library. */
 function destination(root, to = 'library') {
@@ -46,7 +46,7 @@ export function listWorkflows(root) {
       description: workflow.description ?? '',
       source: workflow.source,
       problems: workflowProblems(strip(workflow), roles),
-      warnings: workflowWarnings(strip(workflow), roles),
+      warnings: [...(workflow.specAdded ? [SPEC_ADDED_WARNING] : []), ...workflowWarnings(strip(workflow), roles)],
     })),
     roles: [...roles.values()].map(role => ({ id: role.id, name: role.name, source: role.source, capabilities: role.capabilities, outcomes: role.outcomes.map(outcome => outcome.id) })),
     problems,
@@ -74,12 +74,12 @@ export function showText(root, id) {
   if (!workflow) throw new LibraryError(`No workflow "${id}". See: enki workflow list`)
   // The description is for people choosing in the dashboard. What enki runs is the graph, below.
   const lines = [`${workflow.name} (${workflow.id}, ${workflow.source})`]
-  const { before, after } = phasesOf(workflow)
-  lines.push('', `Before the plan: ${[...before].join(', ') || 'nothing'}`, `After approval: ${[...after].join(', ') || 'nothing'}`, '', 'Steps:')
+  const { beforeSpec, between, after } = phasesOf(workflow)
+  lines.push('', `Before the spec: ${[...beforeSpec].join(', ') || 'nothing'}`, `Before the plan: ${[...between].join(', ') || 'nothing'}`, `After approval: ${[...after].join(', ') || 'nothing'}`, '', 'Steps:')
   for (const node of workflow.nodes) {
     if (node.kind === 'end') continue
     const role = node.kind ? null : roles.get(node.agent)
-    const builtin = { start: 'the orchestrator passes on the request', approval: 'the user approves the plan', verify: 'enki runs the checks' }
+    const builtin = { start: 'the orchestrator passes on the request', 'spec-approval': 'the user approves the spec', approval: 'the user approves the plan', verify: 'enki runs the checks' }
     const what = node.kind ? `built-in: ${builtin[node.kind] ?? node.kind}` : `${role?.name ?? node.agent}${role ? `: ${capabilityWords(role.capabilities)}` : ' (no such agent)'}`
     const waits = node.kind && node.kind !== 'verify' ? [] : waitsFor(workflow, node.id)
     lines.push(`  ${node.id}: ${what}${waits.length ? `. Waits for ${waits.join(', ')}` : ''}`)
@@ -91,7 +91,7 @@ export function showText(root, id) {
   }
   const own = workflowProblems(strip(workflow), roles)
   lines.push('', own.length ? `Can't run:\n${own.map(problem => `  - ${problem}`).join('\n')}` : 'Sound: it can run.')
-  const warnings = workflowWarnings(strip(workflow), roles).filter(warning => !warning.startsWith('the description'))
+  const warnings = [...(workflow.specAdded ? [SPEC_ADDED_WARNING] : []), ...workflowWarnings(strip(workflow), roles).filter(warning => !warning.startsWith('the description'))]
   if (warnings.length) lines.push(...warnings.map(warning => `Note: ${warning}`))
   return lines.join('\n')
 }
@@ -147,7 +147,7 @@ export function copyWorkflow(root, id, newId, to = 'library') {
 
 /** An agent as its agent.json holds it: no file paths, no defaults filled in. */
 export function agentMeta(role) {
-  const flags = Object.fromEntries(['blind', 'browser', 'server', 'plans'].filter(key => role.capabilities?.[key]).map(key => [key, true]))
+  const flags = Object.fromEntries(['blind', 'browser', 'server', 'specs', 'plans'].filter(key => role.capabilities?.[key]).map(key => [key, true]))
   return {
     id: role.id,
     name: role.name,
@@ -207,11 +207,12 @@ export function agentTemplate({ id = 'my-agent', name = 'My agent', capabilities
     tests: 'You write test files only, where the repo keeps them. You never change the code under test.',
     code: 'You change code, never tests: the tests belong to another step.',
     all: 'You change code and tests.',
+    map: 'You write the task\'s codebase map, in the repo\'s memory, and nothing else.',
   }[capabilities.write] ?? ''
   return readFileSync(join(pluginRoot, 'templates', 'agent.md'), 'utf8')
     .replaceAll('{{id}}', id)
     .replaceAll('{{name}}', name)
-    .replaceAll('{{writes}}', [writes, capabilities.blind ? 'You work blind: you see the requirements, never the code being changed or other steps\' reports.' : ''].filter(Boolean).join(' '))
+    .replaceAll('{{writes}}', [writes, capabilities.blind ? 'You work blind: you see the spec, never the code being changed or other steps\' reports.' : ''].filter(Boolean).join(' '))
     .replaceAll('{{outcomes}}', outcomes.length ? outcomes.map(outcome => `- **${outcome.id}:** ${outcome.description ?? ''}`).join('\n') : '- **done:** the work is finished: say what changed in the report.')
 }
 
@@ -236,7 +237,7 @@ export function saveAgent(root, { agent, instructions, creating = false }) {
     throw error
   }
   const existing = loadRoles(root).get(agent.id)
-  writeAgent(agentMeta({ ...agent, capabilities: { blind: false, browser: false, server: false, plans: false, ...agent.capabilities } }), instructions)
+  writeAgent(agentMeta({ ...agent, capabilities: { blind: false, browser: false, server: false, specs: false, plans: false, ...agent.capabilities } }), instructions)
   // An agent from before the rename moves to the new folder when it's saved.
   if (existing && existing.dir !== join(agentsDir(), agent.id)) rmSync(existing.dir, { recursive: true, force: true })
   return { saved: agent.id, warnings }
@@ -312,7 +313,7 @@ function incomingAgents(root, entries, where) {
     if (known.get(meta.id)?.source === 'builtin') own.push(`${label}: "${meta.id}" is one of enki's own agents, which an import can't replace`)
     else if (known.has(meta.id)) own.push(`${label}: an agent "${meta.id}" is already in your library: remove or rename it first`)
     problems.push(...own)
-    if (own.length === 0) incoming.set(meta.id, { ...meta, instructions, capabilities: { blind: false, browser: false, server: false, plans: false, ...meta.capabilities }, source: 'import' })
+    if (own.length === 0) incoming.set(meta.id, { ...meta, instructions, capabilities: { blind: false, browser: false, server: false, specs: false, plans: false, ...meta.capabilities }, source: 'import' })
   }
   return { problems, incoming, known }
 }

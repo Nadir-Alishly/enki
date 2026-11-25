@@ -80,7 +80,7 @@ test('without an install, the team does not start, and the message says what wil
   assert.notEqual(result.code, 0)
   assert.match(result.err, new RegExp(`enki playwright install \\(downloads @playwright/mcp ${MCP_VERSION.replaceAll('.', '\\.')}`))
   assert.match(result.err, /Ask the user/)
-  assert.equal(project.herdr.calls('agent', 'start').length, 2, 'only the scout and the planner, from before the plan')
+  assert.equal(project.herdr.calls('agent', 'start').length, 3, 'only the scout, the spec writer and the planner, from before the plan')
 })
 
 test('the wrong version counts as not installed', () => {

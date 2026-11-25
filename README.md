@@ -2,7 +2,7 @@
 
 <h1 align="center">Enki</h1>
 
-<p align="center">Enki turns Claude Code into a team lead: you describe a change and approve a plan, and a team of Claude agents explores, codes, tests, clicks through and reviews it in its own git worktree.<br>Hooks and a CLI enforce the process, not the model's memory, so nothing writes before you approve, each agent writes only what it may, and every loop has a limit.</p>
+<p align="center">Enki turns Claude Code into a team lead: you describe a change, approve a spec of what to build and a plan of how, and a team of Claude agents explores, codes, tests, clicks through and reviews it in its own git worktree.<br>Hooks and a CLI enforce the process, not the model's memory, so nothing writes before you approve, each agent writes only what it may, and every loop has a limit.</p>
 
 <p align="center"><img src="docs/images/dashboard-task.png" alt="Enki's dashboard showing a finished task: its workflow from Start through scout, planner, approval, coder, tester, QA, tests and reviewer to End, with each agent's model and context use"></p>
 
@@ -28,26 +28,27 @@ Start a new session afterwards. It runs as the orchestrator: name a task, descri
 The orchestrator never writes code. It passes your request on and runs the team in visible herdr panes:
 
 ```
-┌──────────┬──────────┬──────────┐
-│  scout   │  coder   │    qa    │
-├──────────┼──────────┼──────────┤
-│ planner  │  tester  │ reviewer │
-└──────────┴──────────┴──────────┘
+┌─────────────┬──────────┬──────────┬──────────┐
+│    scout    │ planner  │  tester  │          │
+├─────────────┼──────────┼──────────┤ reviewer │
+│ spec writer │  coder   │    qa    │          │
+└─────────────┴──────────┴──────────┴──────────┘
 ```
 
 With enki's **Full** workflow, the default:
 
 1. **Request.** You name the task and describe the change. The orchestrator writes down your words and passes them on: it carries messages between you and the team, and never plans or designs itself.
-2. **Scout and planner.** The scout explores the code. The planner writes the plan from your request and the scout's findings. Questions only you can answer come to you through the orchestrator, and your answers go back to the planner.
-3. **Approval.** The orchestrator shows you the planner's plan, word for word, in plan mode: the goal, sub-goals, acceptance criteria and steps. Approve it, or ask for changes, which go back to the planner. Nothing changes before you approve.
-4. **Baseline.** `enki verify` records the current test results, so existing failures aren't blamed on the change.
-5. **Tests and code, in parallel.** The tester writes tests from the requirements, without seeing the code, while the coder implements.
-6. **Verify and manual checks, in parallel.** Enki runs the tests itself, with no agent and no tokens, while QA starts the server and uses the software in a browser.
-7. **Review.** The reviewer reads the diff once tests pass.
-8. **Loops.** Failing tests, QA's bugs and the reviewer's changes go back to the coder, each at most 3 times. Past that, only you decide how to go on.
-9. **Report.** Repo notes are updated, and you get a report with a scored retrospective on how the task was run.
+2. **Scout and spec writer.** The scout explores the code. The spec writer writes the spec from your request and the scout's findings: what is to be built and how it will be judged, with acceptance criteria and the public interface, never how to build it. Questions only you can answer come to you through the orchestrator, and your answers go back.
+3. **Spec approval.** The orchestrator shows you the spec, word for word, in plan mode. Approve it, or ask for changes, which go back to the spec writer. The approved spec is saved as `spec.md`.
+4. **Planner and approval.** The planner writes how to meet the spec: sub-goals, approach and steps, asking you only about the approach. It's shown to you the same way. Approve it, or ask for changes: to the plan, which go back to the planner, or to the spec, which go to the spec writer and then to you again. If the planner finds the spec can't be met, it sends it back to the spec writer instead of planning around it. Nothing changes before you approve both.
+5. **Baseline.** `enki verify` records the current test results, so existing failures aren't blamed on the change.
+6. **Tests and code, in parallel.** The tester writes tests from the spec, without seeing the code, while the coder implements.
+7. **Verify and manual checks, in parallel.** Enki runs the tests itself, with no agent and no tokens, while QA starts the server and uses the software in a browser.
+8. **Review.** The reviewer reads the diff once tests pass.
+9. **Loops.** Failing tests, QA's bugs and the reviewer's changes go back to the coder, each at most 3 times. Past that, only you decide how to go on.
+10. **Report.** Each repo's map (or notes) is updated, and you get a report with a scored retrospective on how the task was run.
 
-A plan can pick another workflow, such as **Quick fix** (no scout: the planner looks at the code itself, then the coder, tests and review) or **Research** (read-only), or one of your own: [agents and workflows](#agents-and-workflows) are yours to define, share and edit in the dashboard's studio.
+A plan can pick another workflow, such as **Quick fix** (no scout: a short spec and plan, then the coder, tests and review), **Research** (read-only) or **Map** (builds a repo's [codebase map](#the-codebase-map)), or one of your own: [agents and workflows](#agents-and-workflows) are yours to define, share and edit in the dashboard's studio.
 
 <p align="center"><img src="docs/images/studio.png" alt="The workflow studio showing enki's Full workflow as a graph of steps wired by their outcomes"></p>
 
@@ -58,10 +59,10 @@ Agents never commit. Each task works in its own git worktree, and when it finish
 Every task gets its own git worktree, branch, port and, if the plan says so, database, so several tasks can run in the same repo at once.
 
 - **Starting:** you name each task, and the name is its branch: `dark-mode`, or with folders, like `feature/dark-mode`. `enki task new feature/dark-mode` creates the branch `feature/dark-mode` from the project's working branch, `baseBranch` (`dev` unless you change it in Settings), whatever your main tree has checked out, and a worktree under `.enki/worktrees/`. It refuses if the working branch is missing, is behind its upstream as of your last fetch (enki never fetches), or has uncommitted changes while your main tree is on it.
-- **Continuing a task:** when reviewers want changes to a task's pull request, `enki task new dark-mode-review --on dark-mode` works on the branch `dark-mode` itself, in a fresh worktree, and commits on top of it. Push it to update the PR. `--on` takes a finished task's name or any local branch. The new task has its own folder, port and report, and its briefs point to the earlier task's requirements, plan and report. The branch must not be checked out anywhere else. A continued branch is never deleted, even if nothing changed, and `--abandon` puts the WIP on a branch named after the new task, leaving the PR alone.
+- **Continuing a task:** when reviewers want changes to a task's pull request, `enki task new dark-mode-review --on dark-mode` works on the branch `dark-mode` itself, in a fresh worktree, and commits on top of it. Push it to update the PR. `--on` takes a finished task's name or any local branch. The new task has its own folder, port and report, and its briefs point to the earlier task's spec, plan and report. The branch must not be checked out anywhere else. A continued branch is never deleted, even if nothing changed, and `--abandon` puts the WIP on a branch named after the new task, leaving the PR alone.
 - **What git doesn't carry:** enki copies the gitignored files in `worktree.copy`, such as `.env*`, and links the folders in `worktree.link`, such as `node_modules`. If the approved plan has `Scope: deps`, the task gets its own install with `worktree.install`.
 - **Ports:** each task's server gets a free port from `ports`, through `{port}` in `devServer.start` and the `PORT` variable. A machine-wide registry stops two tasks picking the same one.
-- **Per-task settings:** `worktree.env` sets values in the copied env files and the task's processes. It can use `{port}`, `{port:<repo>}` and `{task}`.
+- **Per-task settings:** `worktree.env` sets values in the copied env files and the task's processes. It can use `{port}`, `{port:<repo>}` and `{task}`. A repo the task doesn't include, or whose server enki doesn't manage, gives the port in its own `url`: its main server.
 - **Databases:** with a `database` section, each plan says `Database: copy`, `shared` or `none`. `copy` runs your `copy` command at team start and `drop` at the end. `none` blanks the database env values, so nothing reaches the real database by accident. A plan without the line gets `database.default`, `copy` unless you set it. `"enabled": false` turns copying off but keeps the commands: plans then use the shared database, or none.
 - **Finishing:** enki removes its copies and links, commits everything else to the task's branch under your git identity, with your git hooks, and removes the worktree. The output gives the branch and `git diff <base>...<branch>` to review it, or for a continued task, the diff of its own commits. If a hook refuses the commit, the task stays open. An empty task's branch is deleted, and `--abandon` commits the work as WIP.
 
@@ -101,7 +102,7 @@ QA's browser is limited to the project's own local URLs with Playwright's `--all
 
 ## Dev servers
 
-The orchestrator learns how the system starts and is tested: the scout reports the commands, and the orchestrator keeps them in `.enki/config.json` and the repo notes. Enki then runs the server in its own herdr tab:
+The orchestrator learns how the system starts and is tested: the scout reports the commands, and the orchestrator keeps them in the repo's `repo.json` and its map (see [Memory](#memory)). Enki then runs the server in its own herdr tab:
 
 - QA runs `enki server start` when it needs the server, and `enki server restart` to pick up a change.
 - `enki team start` refuses if no start command is recorded yet.
@@ -129,10 +130,11 @@ It works from any folder. Any enki session or new task also starts it in the bac
 
 While an orchestrator has a task open, a band above its prompt shows the task and its phase, with a **Go to dashboard** button that opens the task's page. Collapse it with its `[-]`. Run from an orchestrator's pane, `enki dashboard --open` also opens that task's page, and `enki dashboard link` prints what the band shows. On KDE Plasma, where Wayland won't let a background process hand the browser the focus, enki asks KWin (through a small script over D-Bus) to bring the dashboard's window forward, switching virtual desktops if needed.
 
-- **Project view:** a year of finished tasks as a heatmap, tokens spent by agent over 7, 30 or 90 days, and every task with its status, duration and tokens.
-- **Task view:** the task's workflow by name, drawn as in the studio and fitted to the page, from Start through Approval to End. It is the team view too: each agent step shows its state, model, effort and how full its context is, and the orchestrator sits top left with its own. A step that came back to the orchestrator wears an orange "With you" badge, and ↩ marks the outcomes that go back to it. Then context by agent, the plan with each step's status, any alert that needs you, and the activity feed. Hover or click a step, a context total or a plan step's owner to pick that agent out everywhere on the page; Escape clears it.
+- **Project view:** a year of finished tasks as a heatmap, tokens spent by agent type over 7, 30 or 90 days, and every task with its status, duration and tokens. The chart counts tokens on the day they were spent, so a task that runs overnight is split between two days.
+- **Task view:** the task's workflow by name, drawn as in the studio and fitted to the page, from Start through both approvals to End. It is the team view too: each agent step shows its state, model, effort and how full its context is, and the orchestrator sits top left with its own. A step that came back to the orchestrator wears an orange "With you" badge, and ↩ marks the outcomes that go back to it. Then context by agent, the plan with each step's status, any alert that needs you, and the activity feed. Hover or click a step, a context total or a plan step's owner to pick that agent out everywhere on the page; Escape clears it.
+- **Codebase map:** each repo's [map](#the-codebase-map), on its checked-out branch, as a graph of bubbles: one per map file, a solid line to its parent and a dashed one to each file it links to, across repos too. Each repo has its own color, and a dashed ring marks a repo with no map yet. Drag bubbles around, pan and zoom the canvas; hover a bubble to light its neighbours. Click one, or Tab to it and press Enter, to read the file on the right, with its parent's description, its `Files:`, its size, its areas and links, and links that open the file they name. A yellow ring marks a file over its size limit or missing from its parent's list.
 - **Workflows:** every workflow available to the project, with duplicate, export and import. Importing shows each new agent's permissions before anything is saved.
-- **Agents:** every agent, enki's own and your library's, with what each may do, its outcomes, what it runs on and which workflows use it. Make a new one from a template, duplicate one of enki's, export and import them. The editor sets the name and type; what enki enforces (what it may change, blind, browser, dev server, plans), with a warning for risky combinations; the outcomes, refusing a rename or removal a workflow still wires; the default model, effort, timeout and skills; and the instructions, with a preview. Enki's own agents open read-only, with a button to duplicate them.
+- **Agents:** every agent, enki's own and your library's, with what each may do, its outcomes, what it runs on and which workflows use it. Make a new one from a template, duplicate one of enki's, export and import them. The editor sets the name and type; what enki enforces (what it may change, blind, browser, dev server, spec, plan), with a warning for risky combinations; the outcomes, refusing a rename or removal a workflow still wires; the default model, effort, timeout and skills; and the instructions, with a preview. Enki's own agents open read-only, with a button to duplicate them.
 - **Studio:** each workflow opens on one screen. Drag around the canvas and zoom; drag agents in from the library on the left; drag steps to place them; drag from an outcome's port to a step to wire it, or onto empty canvas to create the step there. Lines run square: drag any segment to move it, double-click a segment to add a bend and a bend's handle to take it out, drag a line's end onto another block to send the outcome there, and remove a line with the × on it. The library has two tabs: agents, and built-in steps like Tests, which run without an agent. The inspector on the right sets each step's agent, its model, effort and extra skills for this workflow, which steps it waits for, its hand-off limit, and each loop's limit, and offers everything dragging does from the keyboard. Both side panels open and close. A loop without a limit shows red, every change is checked by the same rules the CLI uses, and Save stays off until the workflow can run. Undo and redo with Ctrl+Z and Ctrl+Shift+Z. Enki's own workflows open read-only, with a button to duplicate them. On a phone the studio is for looking only.
 - **Project settings:** it edits the project's `.enki/config.json`: the default workflow, activation, worktrees and the working branch, timeouts, the browser, the port range and database copying. Memory mode, repos and their test and dev server commands are shown but not editable. Changes apply to the next agent started. If the file changes elsewhere while you have unsaved edits, the page asks you to reload instead of overwriting it.
 
@@ -166,28 +168,31 @@ An **agent** is what a workflow step runs. A **workflow** wires agents together 
 }
 ```
 
-- **`write`:** `none` (its reports only), `tests` (test files only), `code` (anything but tests) or `all`.
+- **`write`:** `none` (its reports only), `tests` (test files only), `code` (anything but tests), `all`, or `map` (only the task's codebase map).
 - **`blind`:** it never sees the work: the change, other steps' reports and the plan are hidden from it, as for enki's tester and QA.
 - **`browser` and `server`:** a browser, and `enki server`.
+- **`specs`:** it writes the spec (enki's spec writer), and nothing else.
 - **`plans`:** it writes the plan (enki's planner), and nothing else.
 - **`outcomes`:** its own. The agent reports one with `enki report <outcome>` before it replies. Enki adds `error`, for an agent that finished without reporting, and `timeout`.
-- **`type`:** `scout`, `planner`, `coder`, `tester`, `qa` or `reviewer`. It sets the agent's colour and pattern, and the project's token chart counts by it. An agent without one gets a type from what it does.
+- **`type`:** `scout`, `spec`, `planner`, `coder`, `tester`, `qa` or `reviewer`. It sets the agent's colour and pattern, such as the spec writer's cross-stripes, and the project's token chart counts by it. An agent without one gets a type from what it does.
 
 Enki warns, without refusing, about risky combinations: a browser without the dev server, a blind agent that writes code.
 
 **Agents live in your library** (`~/.enki/library/agents/`), for every project, next to enki's own, which are read-only. A project never has its own: it gives an agent another model, effort or skills on its workflow's steps. Nothing in the library can take an enki agent's id.
 
-**A workflow** is a JSON file: its steps and the edges from each step's outcomes. Three built-in steps frame every workflow:
+**A workflow** is a JSON file: its steps and the edges from each step's outcomes. Four built-in steps frame every workflow:
 
 - **Start:** the orchestrator passes on your request. Its one output, `request`, goes to the first step.
-- **Approval:** you approve the plan. Only a planning step leads into it. Its `approved` starts the work, and `changes` goes back to the planner with your words.
-- **End:** the task is done, and the orchestrator writes the notes and the report.
+- **Spec approval:** you approve the spec. Only a spec step leads into it. Its `approved` goes to the planning step, and `changes` goes back to the spec writer with your words.
+- **Approval:** you approve the plan. Only a planning step leads into it. Its `approved` starts the work, `change-plan` goes back to the planner, and `change-spec` to the spec writer, after which you approve the spec, then the plan, again.
+- **End:** the task is done, and the orchestrator updates each repo's map (or notes) and writes the report.
 
 ```json
 { "from": "reviewer", "on": "changes", "to": "coder", "max": 3 }
 ```
 
-- **Before and after the plan:** the steps between Start and Approval are read-only. The ones after it do the work.
+- **Before and after the plan:** the steps before Approval are read-only, a spec step before Spec approval and a planning step after it. A planning step may send the work back to a spec step, and nowhere else before Spec approval. The steps after Approval do the work.
+- **Workflows from before specs:** enki adds the spec writer and Spec approval before the planning step when it loads one, and says so. Save it in the studio to keep them. A task keeps the workflow it started with.
 - **Targets:** an edge goes to one or more steps (in parallel), or to End.
 - **Hand-offs:** an outcome with no edge goes back to the orchestrator, like QA's `blocked`, so you only wire what moves the work on. The step waits while the rest carries on. The orchestrator fixes what it can and resumes the step (`enki resume <step> --note "..."`), or asks you, and passes on your decision with `enki outcome <step> <outcome> --by user`. A step handed off more than twice stops the task.
 - **Models and skills:** a step can set its own `model` and `effort`, which win over its agent's, and add `skills` to its agent's own. This is how a project tunes its agents, through its own workflow.
@@ -199,7 +204,7 @@ Enki warns, without refusing, about risky combinations: a browser without the de
 **What agents know about a workflow** comes from its graph alone. The planner's brief carries a summary enki writes from it: each step, what its agent may do, where each outcome goes, and what no step does (write tests, use a browser, review the work, fix failing tests). A plan that counts on work no step may do goes back to the planner before you see it: with no step that writes tests, it has to say `Tests: none`. The `description` is only for people choosing a workflow: agents never see it, and the task's own copy of the workflow leaves it out. A duplicate starts without one.
 
 Enki refuses a workflow that can't run, whether in the CLI, the dashboard or an import. That covers:
-- no Start, Approval or End, or Approval reached by something other than a planning step;
+- no Start, Spec approval, Approval or End, Spec approval reached by something other than a spec step, Approval by something other than a planning step, or Approval before Spec approval;
 - a step before the plan that can write;
 - a test run whose `pass` leads nowhere;
 - a step that can't be reached, or can't reach End;
@@ -246,7 +251,42 @@ Enki has no telemetry and no server of its own. Everything below happens on your
 
 ## Memory
 
-Enki keeps what it learns about each repo in three files: `notes.md` (architecture, conventions, how to test, gotchas), `repo.json` (its test, lint and dev-server commands) and `playbook.md` (team rules). They change on a task's branch, so they reach your base branch only when you merge the code. A task you never merge never leaves wrong notes behind.
+Enki keeps what it learns about each repo in its memory: a codebase map in `map/`, `repo.json` (its test, lint and dev-server commands) and `playbook.md` (team rules). It all changes on a task's branch, so it reaches your base branch only when you merge the code. A task you never merge never leaves wrong knowledge behind.
+
+### The codebase map
+
+The map is a pyramid of short Markdown files, browsable on GitHub as well as by agents:
+
+```
+map/
+  README.md        the root: what the repo is, stack, how it runs and is tested, conventions, its areas
+  shop/
+    README.md      an area with children: what it is, and a line for each child
+    cart.md
+  game.md          an area without children
+```
+
+- **Areas follow what the code does**, not how its folders are laid out.
+- **Every file** has a `Files:` line, `## How it works` and `## Gotchas`.
+- **A parent's `## Areas` list** gives each child a link and one line. That line is the only description of the child, so child files carry no front matter.
+- **Sizes:** the root stays under 3 KB, and other files under 4 KB.
+- **Contracts between repos**, such as an API, are described once, in the repo that owns them. Other repos link to them as `repo:path`, for example `melda-server:api/livekit.md`.
+
+**What workers see.** Every worker reads each task repo's root in full in `rules.md`, and briefs name the area files to read. Blind steps read the map too: it describes the code as it is, not the change being made.
+
+**Keeping it current.** At the end of each task, the orchestrator updates the areas the task touched. `enki memory check` runs as the task leaves its notes step:
+- it stops the task on a link that goes nowhere, a folder without a `README.md`, or a file its parent doesn't list;
+- it warns about sizes, `Files:` paths that no longer exist, and `repo:path` links it can't find.
+
+**The first map** comes from a task on the `map` workflow. Ask the orchestrator to create a codebase map, naming the repos or none for all of them, and it starts one, for example `enki task new map-web --workflow map --repo web`:
+1. The scout surveys the code and the old notes.
+2. You approve a spec of what to map.
+3. You approve the planner's outline: every file, its line and its paths.
+4. The **mapper** writes it, one top-level area per visit. It writes only the task's `map/` and lists what it dropped from the old notes.
+
+**Several repos** fit in one task: repeat `--repo`, or leave it out to map them all. The planner starts with the repo that owns what the others share, such as an API, so the others can link to its files. The mapper can come back at most 40 times, so check that the outline has no more than 40 mapper steps.
+
+At `enki phase done`, enki removes the old `notes.md`, which reaches your branch with the merge. In private mode, a task branch from before the map may still have changed those notes when its code is merged. Enki then keeps them deleted and puts what the branch changed in `unmapped/<task>.md` in the memory, and the next task on that repo folds it into the map. A repo without a map keeps using `notes.md` until then. `enki migrate` starts a repo without old notes on an empty root, and `enki doctor` and `enki status` point out repos with no map.
 
 Pick one mode per project. `/enki:init` asks, or run `enki migrate`:
 
@@ -260,9 +300,9 @@ Pick one mode per project. `/enki:init` asks, or run `enki migrate`:
 
 In private mode, `.enki/` is hidden from the team through your clone's `.git/info/exclude`, never a committed `.gitignore`. Memory branches mirror your code branches, and a memory conflict stops `enki memory sync` with a path to resolve it in.
 
-With several repos, each has its own memory, and each follows its own merges. Knowledge about a contract between repos, such as an API, goes on both sides: the backend's notes say what it provides, and the frontend's notes say how it uses it.
+With several repos, each has its own memory, and each follows its own merges.
 
-During a task, only the orchestrator writes memory, and only its own task's copy. Workers can't write memory at all. `enki migrate` warns if your old shared notes may contain knowledge from task branches you haven't merged.
+During a task, only the orchestrator writes memory, and only its own task's copy. Workers can't write memory, apart from the mapper, which writes only the task's `map/`. `enki migrate` warns if your old shared notes may contain knowledge from task branches you haven't merged.
 
 ## Worker skills
 
@@ -320,7 +360,7 @@ The orchestrator drives the `enki` CLI, which is on the Bash `PATH` while the pl
 Also in `.enki/`:
 
 - `playbook.md`: project rules, by role, passed to the workers
-- `memory/<repo>/`: each repo's notes, in private memory mode
+- `memory/<repo>/`: each repo's memory, in private memory mode
 - `tasks/<date>-<slug>/`: plan, reports, `state.json` and `events.jsonl`. Gitignored by default
 
 A plan sets options with lines you approve: `Workflow: <id>` to run another workflow, `Skip: <step>` (or `Tests: none`, `QA: none`) to drop steps, and `Scope: deps`, `Scope: infra` or `Scope: git-init` to unlock extra permissions.
@@ -329,12 +369,13 @@ A plan sets options with lines you approve: `Workflow: <id>` to run another work
 
 | Rule | Enforced by |
 |---|---|
-| Only read-only steps run before approval, and the plan the user approves is the planner's | `enki` refuses steps out of turn, a workflow with a writing step before Approval is refused, the `PreToolUse` hook refuses an `ExitPlanMode` that isn't the planner's plan word for word, and approval is only recorded by a hook on the approved `ExitPlanMode` |
+| Only read-only steps run before approval, and what the user approves is the spec writer's spec and the planner's plan | `enki` refuses steps out of turn, a workflow with a writing step before Approval is refused, the `PreToolUse` hook refuses an `ExitPlanMode` that isn't the waiting spec or plan word for word, and approval is only recorded by a hook on the approved `ExitPlanMode` |
 | Steps run in the workflow's order | `enki ask` and `enki verify` refuse a step the workflow hasn't made ready |
 | Agents can't claim approval | `enki phase approved` is refused, and task state files can't be edited with file tools |
 | The orchestrator can't edit project files | `PreToolUse` hook |
 | Write ownership per agent | `PreToolUse` hook, on file tools and on visible Bash writes, from each step's agent capabilities |
 | Secrets can't be read or written | `PreToolUse` hook |
+| The map holds together, and only its own task's copy changes | The mapper's `map` write level allows only the task's `map/`. `enki memory check` stops a task at its notes step on a broken link or an unlisted file |
 | Blind steps can't see the work | On each tool call, the hook compares the tree with a snapshot taken before coding, and blocks those files, `git diff`, recursive search, the plan, and the reports of steps that see the work |
 | Work is checked before the end | A workflow where code could reach the end without `verify` or a read-only check is refused. A task can't reach notes or report until its workflow ends. `enki phase done --abandon` is the only way out, and it's recorded |
 | Test results mean something | `enki verify` refuses while any step that writes is working |
