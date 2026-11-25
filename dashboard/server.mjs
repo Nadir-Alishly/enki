@@ -7,7 +7,7 @@ import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { enkiHome, writeJsonAtomic } from '../src/state.mjs'
 import { buildId, dashboardDir } from './build.mjs'
-import { fingerprint, herdrAgents, projectDetail, projectList, projects, taskDetail } from './model.mjs'
+import { fingerprint, herdrAgents, projectDetail, projectList, projectMap, projects, taskDetail } from './model.mjs'
 import { agentAction, exportAgentBundle, readAgents } from './agents.mjs'
 import { exportBundle, libraryAction, readLibrary } from './library.mjs'
 import { configHashes, projectSkills, readSettings, saveSettings, SettingsError } from './settings.mjs'
@@ -37,6 +37,7 @@ const STATIC = {
   '/agents.js': ['agents.js', 'text/javascript; charset=utf-8'],
   '/graph.js': ['graph.js', 'text/javascript; charset=utf-8'],
   '/studio.js': ['studio.js', 'text/javascript; charset=utf-8'],
+  '/map.js': ['map.js', 'text/javascript; charset=utf-8'],
   '/favicon.svg': ['favicon.svg', 'image/svg+xml'],
 }
 
@@ -129,11 +130,13 @@ const server = createServer(async (request, response) => {
     const projectMatch = /^\/api\/projects\/([\w-]+)$/.exec(url.pathname)
     const taskMatch = /^\/api\/projects\/([\w-]+)\/tasks\/([\w.-]+)$/.exec(url.pathname)
     const skillsMatch = /^\/api\/projects\/([\w-]+)\/skills$/.exec(url.pathname)
+    const mapMatch = /^\/api\/projects\/([\w-]+)\/map$/.exec(url.pathname)
     const exportMatch = /^\/api\/projects\/([\w-]+)\/library\/export\/([\w-]+)$/.exec(url.pathname)
     const agentExportMatch = /^\/api\/projects\/([\w-]+)\/agents\/export\/([\w-]+)$/.exec(url.pathname)
-    const project = projects().find(item => item.id === (projectMatch ?? taskMatch ?? settingsMatch ?? skillsMatch ?? libraryMatch ?? exportMatch ?? agentsMatch ?? agentExportMatch)?.[1])
-    if ((settingsMatch || skillsMatch || libraryMatch || exportMatch || agentsMatch || agentExportMatch) && !project) return send(response, 404, { error: 'No such project' })
+    const project = projects().find(item => item.id === (projectMatch ?? taskMatch ?? settingsMatch ?? skillsMatch ?? libraryMatch ?? exportMatch ?? agentsMatch ?? agentExportMatch ?? mapMatch)?.[1])
+    if ((settingsMatch || skillsMatch || libraryMatch || exportMatch || agentsMatch || agentExportMatch || mapMatch) && !project) return send(response, 404, { error: 'No such project' })
     if (libraryMatch) return send(response, 200, readLibrary(project))
+    if (mapMatch) return send(response, 200, projectMap(project))
     if (agentsMatch) return send(response, 200, readAgents(project))
     if (exportMatch || agentExportMatch) {
       const [kind, id] = exportMatch ? ['workflow', exportMatch[2]] : ['agent', agentExportMatch[2]]

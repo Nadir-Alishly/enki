@@ -62,7 +62,7 @@ test('team start refuses until the start command is known', async () => {
   const result = project.enki(['team', 'start'])
   assert.notEqual(result.code, 0)
   assert.match(result.err, /Nobody has recorded how to start web/)
-  assert.equal(project.herdr.calls('agent', 'start').length, 2, 'the scout and the planner, from before the plan')
+  assert.equal(project.herdr.calls('agent', 'start').length, 3, 'the scout, the spec writer and the planner, from before the plan')
 })
 
 test('a learned command in config lets the team start', async t => {

@@ -17,6 +17,10 @@
     {
       "id": "questions",
       "description": "The plan needs answers only the user can give: the questions are in the report"
+    },
+    {
+      "id": "spec",
+      "description": "The approved spec can't be met as written: the reasons are in the report, and it goes back to the spec writer"
     }
   ],
   "model": "claude-opus-5-5",

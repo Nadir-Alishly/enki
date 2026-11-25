@@ -17,7 +17,9 @@ export function sv(tag, attrs = {}, ...children) {
   return node
 }
 
-export const FIXED = ['start', 'approval', 'end']
+export const FIXED = ['start', 'spec-approval', 'approval', 'end']
+/** The two steps where the user approves: the spec, then the plan. */
+const APPROVALS = ['spec-approval', 'approval']
 const CARD_W = 176
 const HEAD = 52
 // On a task, an agent's head also holds its model and a context bar.
@@ -31,23 +33,23 @@ const PORT = 8
 export const targetsOf = edge => (Array.isArray(edge.to) ? edge.to : [edge.to])
 export const edgeKey = (from, on, to) => `${from}:${on}:${to}`
 
-/** Each block's output ports: Start's request, Approval's two, Tests' pass and fail, a role's outcomes. */
+/** Each block's output ports: Start's request, the approvals' answers, Tests' pass and fail, a role's outcomes. */
 export function outputsOf(workflow, node, outcomesOfRole) {
-  const own = { start: ['request'], approval: ['approved', 'changes'], end: [], verify: ['pass', 'fail'] }[node.kind] ?? outcomesOfRole(node)
+  const own = { start: ['request'], 'spec-approval': ['approved', 'changes'], approval: ['approved', 'change-spec', 'change-plan'], end: [], verify: ['pass', 'fail'] }[node.kind] ?? outcomesOfRole(node)
   const otherwise = workflow.edges.some(edge => edge.from === node.id && edge.on === 'otherwise')
   return otherwise ? [...own, 'otherwise'] : own
 }
 
 export function nodeSize(node, outputs, head = HEAD) {
   if (node.kind === 'start' || node.kind === 'end') return { w: 96, h: 40 }
-  if (node.kind === 'approval') return { w: 168, h: 76 }
+  if (APPROVALS.includes(node.kind)) return { w: 196, h: 24 + Math.max(2, outputs.length) * 26 }
   return { w: CARD_W, h: head + Math.max(1, outputs.length) * ROW + 6, head }
 }
 
 /** Where an output port sits, relative to its block. */
 export function portPoint(node, size, index) {
   if (node.kind === 'start') return { x: size.w, y: size.h / 2 }
-  if (node.kind === 'approval') return { x: size.w, y: index === 0 ? 26 : 54 }
+  if (APPROVALS.includes(node.kind)) return { x: size.w, y: 26 + index * 26 }
   return { x: size.w, y: (size.head ?? HEAD) + index * ROW + ROW / 2 }
 }
 
@@ -154,17 +156,18 @@ const clip = (text, length) => (text.length > length ? `${text.slice(0, length -
  * - `format`: `{ model, tokens }`, to show each agent's model, effort and context on a task's view.
  */
 export function drawGraph(workflow, { layout, outcomesOfRole, styleOf, routes = {}, status = null, selected = null, bad = new Set(), editable = false, format = null }) {
-  // Stripes for patterned roles, as QA's: one pattern per color.
+  // Stripes for patterned roles, as QA's, or both ways, as the spec writer's: one pattern per color and kind.
   const patterns = new Map()
-  const patternFor = color => {
-    if (!patterns.has(color)) patterns.set(color, `wf-stripes-${patterns.size}`)
-    return `url(#${patterns.get(color)})`
+  const patternFor = (color, kind) => {
+    const key = `${kind}|${color}`
+    if (!patterns.has(key)) patterns.set(key, `wf-stripes-${patterns.size}`)
+    return `url(#${patterns.get(key)})`
   }
   // A role's square: filled, striped (QA) or a dashed outline (the scout).
   const swatch = (style, x = 12, y = 13) =>
     style.pattern === 'dashed'
       ? sv('rect', { x: x + 1, y: y + 1, width: 14, height: 14, fill: 'none', stroke: style.color, 'stroke-width': 2, 'stroke-dasharray': '3 2', class: 'wf-swatch' })
-      : sv('rect', { x, y, width: 16, height: 16, fill: style.pattern === 'stripes' ? patternFor(style.color) : style.color, class: 'wf-swatch' })
+      : sv('rect', { x, y, width: 16, height: 16, fill: ['stripes', 'cross'].includes(style.pattern) ? patternFor(style.color, style.pattern) : style.color, class: 'wf-swatch' })
   const agentLines = (agent, size, { model, tokens }) => {
     const pct = agent.contextWindow ? Math.min(1, agent.context / agent.contextWindow) : 0
     const said = agent.contextWindow ? `Context: ${tokens(agent.context)} of ${tokens(agent.contextWindow)}` : 'No context data yet'
@@ -256,13 +259,13 @@ export function drawGraph(workflow, { layout, outcomesOfRole, styleOf, routes = 
     const picked = isSelected('node', { id: node.id })
     const kind = node.kind ?? 'agent'
     const cls = ['wf-node', `wf-node--${kind}`, state ? `wf-node--${state}` : '', picked ? 'wf-node--selected' : '', editable ? 'wf-node--editable' : ''].filter(Boolean).join(' ')
-    const title = { start: 'Start', end: 'End', approval: 'Approval', verify: 'Tests' }[node.kind] ?? style.label
-    const sub = { start: 'The request', end: 'The report', approval: 'You approve the plan', verify: 'Built-in · no agent' }[node.kind] ?? style.roleName
+    const title = { start: 'Start', end: 'End', 'spec-approval': 'Spec approval', approval: 'Approval', verify: 'Tests' }[node.kind] ?? style.label
+    const sub = { start: 'The request', end: 'The report', 'spec-approval': 'You approve the spec', approval: 'You approve the plan', verify: 'Built-in · no agent' }[node.kind] ?? style.roleName
     const parts = []
     if (node.kind === 'start' || node.kind === 'end') {
       parts.push(sv('rect', { x: 0, y: 0, width: size.w, height: size.h, class: 'wf-node__box wf-node__box--orchestrator' }))
       parts.push(sv('text', { x: size.w / 2, y: size.h / 2 + 5, 'text-anchor': 'middle', class: 'wf-node__name wf-node__name--on-fill' }, title))
-    } else if (node.kind === 'approval') {
+    } else if (APPROVALS.includes(node.kind)) {
       parts.push(sv('rect', { x: 0, y: 0, width: size.w, height: size.h, class: 'wf-node__box wf-node__box--approval' }))
       parts.push(sv('text', { x: 14, y: 26, class: 'wf-node__name' }, title))
       parts.push(sv('text', { x: 14, y: 44, class: 'wf-node__detail' }, run?.status === 'waiting' ? 'Waiting for you' : 'by you'))
@@ -327,9 +330,12 @@ export function drawGraph(workflow, { layout, outcomesOfRole, styleOf, routes = 
   const defs = sv(
     'defs',
     {},
-    [...patterns].map(([color, id]) =>
-      sv('pattern', { id, width: 7, height: 7, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' }, sv('rect', { width: 7, height: 7, fill: 'var(--black-950)' }), sv('rect', { width: 4, height: 7, fill: color })),
-    ),
+    [...patterns].map(([key, id]) => {
+      const [kind, color] = key.split('|')
+      return sv('pattern', { id, width: 7, height: 7, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' },
+        sv('rect', { width: 7, height: 7, fill: 'var(--black-950)' }),
+        kind === 'cross' ? [sv('rect', { width: 3, height: 7, fill: color }), sv('rect', { width: 7, height: 3, fill: color })] : sv('rect', { width: 4, height: 7, fill: color }))
+    }),
   )
   const xs = [...geo.values()].flatMap(({ at, size }) => [at.x, at.x + size.w])
   const ys = [...geo.values()].flatMap(({ at, size }) => [at.y, at.y + size.h])

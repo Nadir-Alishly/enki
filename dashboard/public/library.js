@@ -4,9 +4,9 @@
 // when the person confirms it here.
 
 const ID = /^[a-z][a-z0-9-]{0,30}$/
-const WRITE_WORDS = { none: 'writes nothing but its report', tests: 'writes test files only', code: 'writes code, never tests', all: 'writes code and tests' }
+const WRITE_WORDS = { none: 'writes nothing but its report', tests: 'writes test files only', code: 'writes code, never tests', all: 'writes code and tests', map: 'writes the codebase map, nothing else' }
 const capabilityText = caps =>
-  [caps.plans ? 'writes the plan, nothing else' : WRITE_WORDS[caps.write], caps.blind && 'blind', caps.browser && 'has a browser', caps.server && 'starts the dev server'].filter(Boolean).join(', ')
+  [caps.specs ? 'writes the spec, nothing else' : caps.plans ? 'writes the plan, nothing else' : WRITE_WORDS[caps.write], caps.blind && 'blind', caps.browser && 'has a browser', caps.server && 'starts the dev server'].filter(Boolean).join(', ')
 
 /** The name the server gives a copy: "Full (copy)", or "Full (copy 2)" when that is taken. */
 const copyName = (name, taken) => {

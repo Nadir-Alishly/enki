@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { makeProject } from './helpers/harness.mjs'
+import { readMainMemoryTree } from '../src/memory.mjs'
 
 const IDENTITY = { GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.invalid', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.invalid' }
 const git = (cwd, ...args) => spawnSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, ...IDENTITY } }).stdout.trim()
@@ -13,7 +14,7 @@ const git = (cwd, ...args) => spawnSync('git', args, { cwd, encoding: 'utf8', en
  * A project with one or more git repos, each on `dev`. Repo settings start in config.json,
  * with old-style shared notes, so `enki migrate` has something to move.
  */
-function project({ repos = ['web'], memory, extra = {} } = {}) {
+function project({ repos = ['web'], memory, notes = true, extra = {} } = {}) {
   const p = makeProject({
     worktrees: true,
     ports: { from: 47600, to: 47699 },
@@ -28,8 +29,10 @@ function project({ repos = ['web'], memory, extra = {} } = {}) {
     git(dir, 'init', '-q', '-b', 'dev')
     git(dir, 'add', '-A')
     git(dir, 'commit', '-qm', 'init')
-    mkdirSync(join(p.root, '.enki/notes'), { recursive: true })
-    writeFileSync(join(p.root, '.enki/notes', `${name}.md`), `# ${name} notes\n\nOriginal fact.\n`)
+    if (notes) {
+      mkdirSync(join(p.root, '.enki/notes'), { recursive: true })
+      writeFileSync(join(p.root, '.enki/notes', `${name}.md`), `# ${name} notes\n\nOriginal fact.\n`)
+    }
   }
   const enki = (args, env = {}) => p.enki(args, { ...IDENTITY, ...env })
   if (memory) {
@@ -101,6 +104,26 @@ test('private mode: migrate creates a hidden memory repo and adds nothing to the
   assert.equal(git(memory, 'rev-parse', '--is-bare-repository'), 'true')
   assert.match(git(memory, 'show', 'dev:notes.md'), /Original fact/)
   assert.deepEqual(JSON.parse(git(memory, 'show', 'dev:repo.json')).test, ['true'])
+})
+
+test('the dashboard reads a whole map folder, from the work tree or the private repo\'s checked-out branch', () => {
+  for (const mode of ['repo', 'private']) {
+    const p = project({ memory: mode, notes: false })
+    const repo = { path: 'web', name: 'web' }
+    assert.match(readMainMemoryTree(p.root, repo, 'map')['README.md'], /^# web/, mode)
+    assert.deepEqual(Object.keys(readMainMemoryTree(p.root, repo, 'nothing')), [], mode)
+  }
+})
+
+test('private mode: a task that fails to start takes back its memory branch and checkout too', () => {
+  const p = project({ memory: 'private', extra: { ports: { from: 47650, to: 47650 } } })
+  assert.equal(p.enki(['task', 'new', 'one'], { HERDR_PANE_ID: 'w1:a' }).code, 0)
+  const second = p.enki(['task', 'new', 'two'], { HERDR_PANE_ID: 'w1:b' })
+  assert.match(second.err, /No free port/)
+  const memory = join(p.root, '.enki/memory/web')
+  assert.equal(git(memory, 'branch', '--list', 'two'), '', 'no memory branch')
+  assert.equal(git(p.repo('web'), 'branch', '--list', 'two'), '', 'no code branch')
+  assert.equal(existsSync(join(p.root, '.enki/worktrees/two')), false, 'no worktree folder')
 })
 
 test('private mode: a repo at the project root hides .enki through the clone\'s own exclude file', () => {
@@ -339,6 +362,70 @@ test('private mode: a conflict stops with a path, and a rerun finishes it', () =
   assert.match(memoryNotes(p), /one and two/)
 })
 
+/** Private memory where dev's map replaced notes.md, and a task from before it, now merged, changed them. */
+function mapBesideOldNotes(withMap = true) {
+  const p = project({ memory: 'private' })
+  const pane = start(p, 'demo')
+  taskWithNote(p, 'demo', pane, 'Learned in demo.')
+  finish(p, 'demo', pane)
+  const tree = join(p.base, 'dev-memory')
+  git(join(p.root, '.enki/memory/web'), 'worktree', 'add', '-q', tree, 'dev')
+  if (withMap) writeMap(tree)
+  git(tree, 'rm', '-q', 'notes.md')
+  git(tree, 'add', '-A')
+  git(tree, 'commit', '-qm', 'map')
+  git(join(p.root, '.enki/memory/web'), 'worktree', 'remove', '--force', tree)
+  git(p.repo('web'), 'merge', '-q', '--no-edit', 'demo')
+  return p
+}
+const devFiles = p => git(join(p.root, '.enki/memory/web'), 'ls-tree', '-r', '--name-only', 'dev').split('\n')
+
+test('private mode: notes a branch changed, that the map has replaced, are kept to fold into the map', () => {
+  const p = mapBesideOldNotes()
+  const pane = start(p, 'next', 'w1:b')
+  const files = devFiles(p)
+  assert.ok(!files.includes('notes.md'), 'the old notes stay deleted')
+  assert.ok(files.includes('map/README.md') && files.includes('unmapped/demo.md'), files.join())
+  const { memoryDir } = taskRepo(p, 'next')
+  const note = join(memoryDir, 'unmapped/demo.md')
+  assert.match(readFileSync(note, 'utf8'), /^\+Learned in demo\.$/m)
+  assert.doesNotMatch(readFileSync(note, 'utf8'), /Original fact/, 'only what the branch changed')
+  assert.match(p.enki(['status'], pane).out, /unmapped\/demo\.md: notes to fold into the map/)
+  assert.match(p.enki(['memory', 'check'], pane).out, /warning: web: unmapped\/demo\.md has notes the map lacks/)
+  assert.equal(write(p, note, pane), null, 'the orchestrator may empty it')
+  writeFileSync(note, '')
+  assert.doesNotMatch(p.enki(['status'], pane).out, /unmapped/)
+  finish(p, 'next', pane)
+  assert.match(git(join(p.root, '.enki/memory/web'), 'show', '--name-status', '--format=', 'dev'), /^D\tunmapped\/demo\.md$/m)
+})
+
+test('private mode: a merge left half-done by an older enki is settled too', () => {
+  const p = mapBesideOldNotes()
+  const memory = join(p.root, '.enki/memory/web')
+  const path = join(p.root, '.enki/worktrees/memory-sync/web')
+  git(memory, 'worktree', 'add', '-q', path, 'dev')
+  spawnSync('git', ['merge', '--no-edit', '-q', 'demo'], { cwd: path })
+  assert.match(git(path, 'status', '--short'), /^DU notes\.md$/m)
+  writeFileSync(join(p.root, '.enki/memory/web.sync.json'), JSON.stringify({ branch: 'demo', target: 'dev', path }))
+  const result = p.enki(['memory', 'sync'])
+  assert.equal(result.code, 0, result.out)
+  assert.match(result.out, /finished merging memory from demo\. The map replaced notes\.md.*unmapped\/demo\.md/)
+  assert.ok(!devFiles(p).includes('notes.md') && devFiles(p).includes('unmapped/demo.md'))
+})
+
+test('private mode: a file one side deleted stays a conflict until someone decides', () => {
+  const p = mapBesideOldNotes(false)
+  const first = p.enki(['memory', 'sync'])
+  assert.equal(first.code, 1)
+  const path = /Resolve the files in (\S+), then/.exec(first.out)[1]
+  const again = p.enki(['memory', 'sync'])
+  assert.equal(again.code, 1, 'no conflict markers does not mean resolved')
+  assert.match(again.out, /notes\.md \(deleted on one side/)
+  git(path, 'add', 'notes.md')
+  assert.equal(p.enki(['memory', 'sync']).code, 0)
+  assert.match(memoryNotes(p), /Learned in demo/)
+})
+
 test('private mode: enki memory merge takes a task\'s memory by hand', () => {
   const p = finishedPrivateTask()
   writeFileSync(join(p.repo('web'), 'src/other.js'), 'x\n')
@@ -418,8 +505,136 @@ test('a field in both config.json and repo.json is reported, and the repo wins',
   assert.match(result.out, /warning: repos\[0\]\.test is set in both/)
 })
 
+test('a broken repo.json in a task refuses work, but the orchestrator can still fix it', () => {
+  const p = project({ memory: 'repo' })
+  const pane = start(p, 'demo')
+  const repoJson = join(taskRepo(p, 'demo').memoryDir, 'repo.json')
+  writeFileSync(repoJson, JSON.stringify({ url: 'http://[::1]:{port}/' }))
+  const refused = p.hook('pre-tool-use', { tool_name: 'Write', tool_input: { file_path: join(taskRepo(p, 'demo').workdir, 'src/a.js'), content: 'x' } }, pane)
+  assert.equal(decision(refused), 'deny')
+  assert.match(refused.json.hookSpecificOutput.permissionDecisionReason, /url: must be a localhost URL with a real port, not \{port\}/)
+  assert.equal(write(p, repoJson, pane), null, 'the file that broke it stays fixable')
+})
+
 test('repo.json cannot move a repo', () => {
   const p = project({ memory: 'repo' })
   p.write(join(p.repo('web'), '.enki/repo.json'), JSON.stringify({ path: 'elsewhere' }))
   assert.match(p.enki(['validate']).err, /repo\.json can't set "path"/)
+})
+
+// The codebase map
+
+const MAP_PLAN = '# Plan\n\nTests: none\nQA: none\n\n1. [Mapper] Write the map\n2. [Orchestrator] Report\n'
+const MAP_ROOT = '# web\n\nA small app.\n\nFiles: src/\n\n## Areas\n\n- [app](app.md): the app itself\n\n## Gotchas\n\n- None known.\n'
+
+/** Writes a map into a memory folder: the root and one area. */
+function writeMap(memoryDir, { root = MAP_ROOT, area = '# App\n\nThe app.\n\nFiles: src/app.js\n\n## How it works\n\nIt runs.\n\n## Gotchas\n\n- None known.\n' } = {}) {
+  mkdirSync(join(memoryDir, 'map'), { recursive: true })
+  writeFileSync(join(memoryDir, 'map/README.md'), root)
+  if (area !== null) writeFileSync(join(memoryDir, 'map/app.md'), area)
+}
+
+test('migrate starts a repo without old notes on an empty map, in either mode, and keeps old notes as notes.md', () => {
+  const p = project({ notes: false, memory: 'repo' })
+  assert.match(readFileSync(join(p.repo('web'), '.enki/map/README.md'), 'utf8'), /^# web\n[\s\S]*## Areas/)
+  assert.ok(!existsSync(join(p.repo('web'), '.enki/notes.md')), 'no notes.md beside the map')
+  const pane = start(p, 'demo')
+  assert.match(p.enki(['status'], pane).out, /Memory for web: .* \(no map yet: build one with a task on --workflow map\)/)
+  const priv = project({ notes: false, memory: 'private' })
+  assert.match(git(join(priv.root, '.enki/memory/web'), 'show', 'dev:map/README.md'), /^# web/, 'private memory holds folders')
+  assert.match(priv.enki(['doctor']).out, /note: web has no codebase map yet/)
+  const old = project({ memory: 'repo' })
+  assert.ok(existsSync(join(old.repo('web'), '.enki/notes.md')) && !existsSync(join(old.repo('web'), '.enki/map')), 'old notes wait for a map task')
+})
+
+test('every worker reads each repo\'s map root in rules.md, and the map path instead of notes', () => {
+  const p = project({ notes: false, memory: 'repo' })
+  writeMap(join(p.repo('web'), '.enki'))
+  git(p.repo('web'), 'add', '-A')
+  git(p.repo('web'), 'commit', '-qm', 'map')
+  start(p, 'demo')
+  const rules = readFileSync(join(p.taskDir('demo'), 'rules.md'), 'utf8')
+  const memoryDir = taskRepo(p, 'demo').memoryDir
+  assert.ok(rules.includes(`Map: \`${join(memoryDir, 'map')}/\``), rules)
+  assert.ok(!rules.includes('Notes: `'), 'a repo with a map has no notes line')
+  assert.match(rules, /## Codebase map\n[\s\S]*### web: `.*map\/README\.md`\n\n### web\n\nA small app\.[\s\S]*#### Areas\n\n- \[app\]\(app\.md\)/)
+  assert.ok(rules.indexOf('## Codebase map') < rules.indexOf('## Safety'))
+})
+
+test('the orchestrator writes the task\'s map, never the main tree\'s, and a broken map stops the task at the notes step', () => {
+  const p = project({ notes: false, memory: 'repo' })
+  writeMap(join(p.repo('web'), '.enki'))
+  git(p.repo('web'), 'add', '-A')
+  git(p.repo('web'), 'commit', '-qm', 'map')
+  const pane = start(p, 'demo')
+  const memoryDir = taskRepo(p, 'demo').memoryDir
+  assert.equal(write(p, join(memoryDir, 'map/app/deep.md'), pane), null, 'its own task\'s map, at any depth')
+  assert.equal(write(p, join(p.repo('web'), '.enki/map/app.md'), pane), 'deny', 'the main tree\'s map')
+  const plan = p.planReady('# Plan\n', pane)
+  p.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan } }, { ...IDENTITY, ...pane })
+  assert.equal(p.enki(['team', 'start'], pane).code, 0)
+  p.runWorkflow('demo', pane)
+  assert.equal(p.enki(['phase', 'notes'], pane).code, 0)
+  writeFileSync(join(memoryDir, 'map/stray.md'), '# Stray\n\nSee [gone](gone.md).\n')
+  const refused = p.enki(['phase', 'reporting'], pane)
+  assert.equal(refused.code, 1)
+  assert.match(refused.err, /web: map\/stray\.md: the link gone\.md goes nowhere/)
+  assert.match(refused.err, /web: map\/stray\.md isn't in map\/README\.md's Areas list/)
+  assert.equal(p.enki(['memory', 'check'], pane).code, 1)
+  writeFileSync(join(memoryDir, 'map/stray.md'), '# Stray\n\nFiles: src/gone.js\n')
+  writeFileSync(join(memoryDir, 'map/README.md'), MAP_ROOT.replace('## Gotchas', '- [stray](stray.md): odds and ends\n\n## Gotchas'))
+  const check = p.enki(['memory', 'check'], pane)
+  assert.equal(check.code, 0, check.out)
+  assert.match(check.out, /warning: web: map\/stray\.md: src\/gone\.js \(in Files:\) doesn't exist/)
+  const moved = p.enki(['phase', 'reporting'], pane)
+  assert.equal(moved.code, 0, moved.err)
+  assert.match(moved.out, /warning: web: map\/stray\.md: src\/gone\.js/)
+})
+
+test('a map task: refused on the old shared layout; the mapper writes only the map; the old notes go at the end', () => {
+  const legacy = project()
+  const refused = legacy.enki(['task', 'new', 'map-web', '--workflow', 'map'], { HERDR_PANE_ID: 'w1:a' })
+  assert.notEqual(refused.code, 0)
+  assert.match(refused.err, /Run enki migrate --memory repo \(or private, for team repos\) first/)
+
+  const p = project({ memory: 'repo' })
+  const pane = { HERDR_PANE_ID: 'w1:a' }
+  assert.equal(p.enki(['task', 'new', 'map-web', '--workflow', 'map'], pane).code, 0)
+  const memoryDir = taskRepo(p, 'map-web').memoryDir
+  const mapper = p.asWorker('mapper', 'map-web')
+  assert.equal(write(p, join(memoryDir, 'map/README.md'), mapper), null)
+  assert.equal(write(p, join(memoryDir, 'map/shop/cart.md'), mapper), null)
+  for (const path of [join(memoryDir, 'notes.md'), join(memoryDir, 'repo.json'), join(taskRepo(p, 'map-web').workdir, 'src/app.js')]) {
+    assert.equal(write(p, path, mapper), 'deny', path)
+  }
+  assert.equal(write(p, join(p.repo('web'), '.enki/map/README.md'), mapper), 'deny', 'not the main tree\'s map')
+
+  const plan = p.planReady(MAP_PLAN, pane)
+  p.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan } }, { ...IDENTITY, ...pane })
+  assert.equal(p.enki(['team', 'start'], pane).code, 0)
+  writeMap(memoryDir)
+  p.runWorkflow('map-web', pane)
+  assert.equal(p.enki(['phase', 'notes'], pane).code, 0)
+  const done = p.enki(['phase', 'done'], pane)
+  assert.equal(done.code, 0, done.err)
+  assert.match(done.out, /web: removed the old notes \(notes\.md\), now folded into the map/)
+  assert.match(git(p.repo('web'), 'show', 'map-web:.enki/map/README.md'), /A small app/)
+  assert.equal(git(p.repo('web'), 'ls-tree', '--name-only', 'map-web', '.enki/notes.md'), '', 'the old notes are gone on the task branch')
+  assert.match(readFileSync(join(p.repo('web'), '.enki/notes.md'), 'utf8'), /Original fact/, 'dev keeps them until the merge')
+})
+
+test('the mapper\'s "more" sends it back for the next areas', () => {
+  const p = project({ memory: 'repo' })
+  const pane = { HERDR_PANE_ID: 'w1:a' }
+  assert.equal(p.enki(['task', 'new', 'map-web', '--workflow', 'map'], pane).code, 0)
+  const plan = p.planReady(MAP_PLAN, pane)
+  p.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan } }, { ...IDENTITY, ...pane })
+  assert.equal(p.enki(['team', 'start'], pane).code, 0)
+  p.herdr.script(script => { script.report = { 'mapper-map-web': ['more'] } })
+  const brief = p.brief('brief-mapper.md')
+  const first = p.enki(['ask', 'mapper', brief, '--step', '1'], pane)
+  assert.equal(first.code, 0, first.err)
+  assert.equal(p.state('map-web').run.steps.mapper.status, 'queued', 'back to the mapper for the next areas')
+  assert.equal(p.enki(['ask', 'mapper', brief, '--step', '1'], pane).code, 0)
+  assert.equal(p.state('map-web').run.endReached, true)
 })

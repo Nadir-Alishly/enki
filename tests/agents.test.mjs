@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { decide } from '../src/policy.mjs'
-import { agentWarnings, builtinRoles, loadRoles, roleProblems, snapshotTeam, stepCapabilities, teamEntry, teamOf } from '../src/agents.mjs'
+import { agentWarnings, AGENT_TYPES, builtinRoles, loadRoles, roleProblems, snapshotTeam, stepCapabilities, teamEntry, teamOf, typeOf } from '../src/agents.mjs'
 
 const good = { id: 'docs', name: 'Docs writer', capabilities: { write: 'none' }, outcomes: [{ id: 'done' }] }
 
@@ -18,11 +18,18 @@ function writeRole(dir, meta, skill = '---\nname: x\ndescription: An agent\n---\
 
 test('enki’s own roles load, with the capabilities today’s policy had, and a planner that writes nothing but the plan', () => {
   const roles = builtinRoles()
-  assert.deepEqual([...roles.keys()].sort(), ['coder', 'planner', 'qa', 'reviewer', 'scout', 'tester'])
+  assert.deepEqual([...roles.keys()].sort(), ['coder', 'mapper', 'planner', 'qa', 'reviewer', 'scout', 'spec-writer', 'tester'])
+  assert.equal(roles.get('mapper').capabilities.write, 'map', 'the mapper writes only the map')
+  assert.deepEqual(roles.get('mapper').outcomes.map(outcome => outcome.id), ['done', 'more', 'blocked'])
+  assert.equal(typeOf({ capabilities: { write: 'map' } }), 'scout', 'an agent that writes the map looks like the scout')
   const caps = id => roles.get(id).capabilities
-  assert.deepEqual([caps('scout').write, caps('planner').write, caps('coder').write, caps('tester').write, caps('qa').write, caps('reviewer').write], ['none', 'none', 'code', 'tests', 'none', 'none'])
+  assert.deepEqual([caps('scout').write, caps('spec-writer').write, caps('planner').write, caps('coder').write, caps('tester').write, caps('qa').write, caps('reviewer').write], ['none', 'none', 'none', 'code', 'tests', 'none', 'none'])
   assert.deepEqual([...roles.values()].filter(role => role.capabilities.plans).map(role => role.id), ['planner'])
-  assert.deepEqual(roles.get('planner').outcomes.map(outcome => outcome.id), ['ready', 'questions'])
+  assert.deepEqual([...roles.values()].filter(role => role.capabilities.specs).map(role => role.id), ['spec-writer'])
+  assert.deepEqual(roles.get('planner').outcomes.map(outcome => outcome.id), ['ready', 'questions', 'spec'])
+  assert.deepEqual(roles.get('spec-writer').outcomes.map(outcome => outcome.id), ['ready', 'questions'])
+  assert.equal(typeOf(roles.get('spec-writer')), 'spec')
+  assert.deepEqual([AGENT_TYPES.spec.color, AGENT_TYPES.spec.pattern], [AGENT_TYPES.planner.color, 'cross'], 'the spec writer has the planner’s color, cross-striped')
   assert.deepEqual([...roles.values()].filter(role => role.capabilities.blind).map(role => role.id).sort(), ['qa', 'tester'])
   assert.equal(caps('qa').browser && caps('qa').server, true)
   assert.deepEqual(roles.get('reviewer').outcomes.map(outcome => outcome.id), ['approve', 'changes'])
@@ -36,6 +43,9 @@ test('a role.json is checked: ids, capabilities, outcomes and the rest', () => {
     [{ ...good, capabilities: { write: 'everything' } }, /capabilities\.write/],
     [{ ...good, capabilities: { write: 'none', root: true } }, /unknown key "root"/],
     [{ ...good, capabilities: { write: 'code', plans: true } }, /a role that plans writes nothing but its plan/],
+    [{ ...good, capabilities: { write: 'tests', specs: true } }, /a role that writes the spec writes nothing else/],
+    [{ ...good, capabilities: { write: 'none', specs: true, plans: true } }, /the spec or the plan, not both/],
+    [{ ...good, id: 'spec-approval' }, /reserved/],
     [{ ...good, id: 'approval' }, /reserved/],
     [{ ...good, outcomes: [] }, /at least one/],
     [{ ...good, outcomes: [{ id: 'timeout' }] }, /enki's own/],

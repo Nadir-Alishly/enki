@@ -11,11 +11,11 @@
   "outcomes": [
     {
       "id": "done",
-      "description": "Tests for the requirements are written: what they cover is in the report"
+      "description": "Tests for the spec are written: what they cover is in the report"
     },
     {
       "id": "unclear",
-      "description": "The requirements don't say enough to test: the questions are in the report"
+      "description": "The spec doesn't say enough to test: the questions are in the report"
     }
   ],
   "model": "claude-haiku-5-5",

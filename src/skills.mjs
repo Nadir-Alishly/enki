@@ -18,6 +18,7 @@ export function installedPlugins() {
     plugins = JSON.parse(output)
       .filter(plugin => plugin.enabled)
       .map(plugin => ({ name: plugin.id.split('@')[0], root: plugin.readFromFolder ?? plugin.installPath }))
+      .filter(plugin => plugin.root) // Claude Code's built-in plugins have no folder.
   } catch {
     plugins = []
   }

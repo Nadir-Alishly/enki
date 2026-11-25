@@ -9,7 +9,7 @@ import { loadSecrets, redact } from './secrets.mjs'
 export const STATE_VERSION = 1
 export const EVENT_VERSION = 1
 
-export const PHASES = ['intake', 'planning', 'approved', 'baseline', 'coding', 'testing', 'review', 'fixing', 'notes', 'reporting', 'done']
+export const PHASES = ['intake', 'spec', 'planning', 'approved', 'baseline', 'coding', 'testing', 'review', 'fixing', 'notes', 'reporting', 'done']
 
 const LOCK_STALE_MS = 10000
 const LOCK_RETRY_MS = 25

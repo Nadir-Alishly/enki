@@ -1,15 +1,16 @@
-// A repo's memory: what enki has learned (notes.md), its commands (repo.json) and its team
+// A repo's memory: what enki has learned (its codebase map, map/, or notes.md before it has one), its commands (repo.json) and its team
 // rules (playbook.md). It changes on a task's branch and reaches the base branch only when
 // the code does. Two modes, one per project:
 //   repo:    <repo>/.enki/, committed with the code. Git does everything.
 //   private: .enki/memory/<repo>, a local bare repo whose branches mirror the code's,
 //            for team repos where enki files mustn't be committed.
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { join, relative, sep } from 'node:path'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join, relative, sep } from 'node:path'
 import { configPath, loadConfig } from './config.mjs'
 import { listTasks, writeJsonAtomic } from './state.mjs'
 import { git, worktreesDir } from './worktrees.mjs'
+import { STUB_ROOT, unmappedDir } from './map.mjs'
 
 export const MEMORY_FILES = ['notes.md', 'repo.json', 'playbook.md']
 const REPO_FIELDS_KEPT = ['path', 'name']
@@ -58,6 +59,30 @@ export function readMainMemory(root, repo, file) {
   }
   const path = join(main, '.enki', file)
   return existsSync(path) ? readFileSync(path, 'utf8') : null
+}
+
+/** Every file under a memory folder (`map`) on the checked-out branch, as { relative path: text }. */
+export function readMainMemoryTree(root, repo, folder) {
+  const main = join(root, repo.path)
+  if (memoryMode(root) === 'private') {
+    const dir = memoryRepo(root, repo.name ?? repo.path)
+    if (!existsSync(dir)) return {}
+    const branch = (existsSync(main) ? currentBranch(main) : null) ?? 'HEAD'
+    const ref = git(dir, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { allowFail: true }) ? branch : 'HEAD'
+    const names = (git(dir, ['ls-tree', '-r', '--name-only', ref, '--', `${folder}/`], { allowFail: true }) ?? '').split('\n').filter(Boolean)
+    return Object.fromEntries(names.map(name => [name.slice(folder.length + 1), showFile(dir, ref, name) ?? '']))
+  }
+  const base = join(main, '.enki', folder)
+  const files = {}
+  const walk = dir => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) walk(path)
+      else if (entry.isFile()) files[relative(base, path).split(sep).join('/')] = readFileSync(path, 'utf8')
+    }
+  }
+  if (existsSync(base)) walk(base)
+  return files
 }
 
 /** In a task: the task's own copy, on its branch. */
@@ -128,14 +153,26 @@ function gitEnv(dir, args, env, input) {
   }
 }
 
+/** Writes `files` ({'map/README.md': text}) as a tree, one mktree per folder, and returns its id. */
+function writeTree(dir, files) {
+  const blobs = []
+  const folders = new Map()
+  for (const [file, text] of Object.entries(files)) {
+    const [head, ...rest] = file.split('/')
+    if (rest.length === 0) blobs.push(`100644 blob ${gitEnv(dir, ['hash-object', '-w', '--stdin'], {}, text)}\t${head}`)
+    else folders.set(head, { ...folders.get(head), [rest.join('/')]: text })
+  }
+  const entries = [...blobs, ...[...folders].map(([name, inner]) => `040000 tree ${writeTree(dir, inner)}\t${name}`)]
+  return gitEnv(dir, ['mktree'], {}, entries.length > 0 ? `${entries.join('\n')}\n` : '')
+}
+
 /** Creates the bare memory repo, with one commit of `files` on `branch`. */
 export function initPrivateRepo({ root, name, branch, files, codeDir }) {
   const dir = memoryRepo(root, name)
   if (existsSync(dir)) throw new MemoryError(`${dir} already exists.`)
   mkdirSync(dir, { recursive: true })
   gitEnv(dir, ['init', '-q', '--bare', `--initial-branch=${branch}`], {})
-  const entries = Object.entries(files).map(([file, text]) => `100644 blob ${gitEnv(dir, ['hash-object', '-w', '--stdin'], {}, text)}\t${file}`)
-  const tree = gitEnv(dir, ['mktree'], {}, entries.length > 0 ? `${entries.join('\n')}\n` : '')
+  const tree = writeTree(dir, files)
   const commit = gitEnv(dir, ['commit-tree', tree, '-m', 'enki memory'], identityEnv(codeDir))
   gitEnv(dir, ['update-ref', `refs/heads/${branch}`, commit], {})
   return dir
@@ -212,12 +249,45 @@ export function finishTaskMemory({ root, slug, repo, codeCommit, codeTop, baseBr
   if (result === null) {
     // Memory changed but the code didn't: there's no merge to wait for, so it applies now.
     const merged = mergeInto({ root, dir, name: repo.name, target: baseBranch, branch: slug, codeDir: repo.main })
-    return merged.conflict ? merged.message : `${repo.name}: memory changed with no code change, so it went straight onto ${baseBranch}.`
+    return merged.conflict ? merged.message : `${repo.name}: memory changed with no code change, so it went straight onto ${baseBranch}.${merged.note}`
   }
   return result
 }
 
 const syncState = (root, name) => join(root, '.enki', 'memory', `${safeName(name)}.sync.json`)
+
+/** A merge's conflicted files, each with the stages git has for it: 1 the base, 2 ours, 3 theirs. */
+function conflicts(path) {
+  const files = new Map()
+  for (const line of (git(path, ['ls-files', '-u', '-z'], { allowFail: true }) ?? '').split('\0').filter(Boolean)) {
+    const [, sha, stage, file] = /^\d+ (\w+) (\d)\t(.+)$/s.exec(line)
+    files.set(file, { ...files.get(file), [stage]: sha })
+  }
+  return files
+}
+
+/**
+ * A branch from before the map changed the old notes, and the map has since replaced them: git calls
+ * that a conflict, as one side deleted the file. The notes stay deleted, and what the branch changed
+ * in them is kept in unmapped/, for the next task to fold into the map. Returns the files it settled.
+ */
+function settleOldNotes(path, branch) {
+  if (!existsSync(join(path, 'map', 'README.md'))) return []
+  const settled = [...conflicts(path)].filter(([file, stage]) => /^notes(\.md$|\/)/.test(file) && stage[1] && Boolean(stage[2]) !== Boolean(stage[3]))
+  if (settled.length === 0) return []
+  const changes = settled.map(([file, stage]) => {
+    const diff = git(path, ['diff', '--no-color', '--no-ext-diff', '-U0', stage[1], stage[2] ?? stage[3]])
+    return `## ${file}\n\n${diff.slice(diff.indexOf('\n@@') + 1).replace(/^(@@ .*? @@).*$/gm, '$1')}\n`
+  })
+  const note = join(unmappedDir(path), `${safeName(branch)}.md`)
+  mkdirSync(dirname(note), { recursive: true })
+  writeFileSync(note, `# Not in the map yet\n\nWhat these old notes gained (+) and lost (-) beside the map, which replaced them. Merged with ${branch}.\n\n${changes.join('\n')}`)
+  for (const [file] of settled) git(path, ['rm', '-q', '-f', '--', file])
+  git(path, ['add', '--', relative(path, note)])
+  return settled.map(([file]) => file)
+}
+
+const settledNote = (settled, branch) => (settled.length ? ` The map replaced ${settled.join(', ')}, so what changed there is in unmapped/${safeName(branch)}.md, to fold into the map.` : '')
 
 /** Merges memory branch `branch` into `target` in a temporary checkout. A conflict is left for you. */
 function mergeInto({ root, dir, name, target, branch, codeDir }) {
@@ -226,14 +296,19 @@ function mergeInto({ root, dir, name, target, branch, codeDir }) {
   rmSync(path, { recursive: true, force: true })
   git(dir, ['worktree', 'prune'])
   git(dir, ['worktree', 'add', '-q', path, target])
+  let settled = []
   try {
     gitEnv(path, ['merge', '--no-edit', '-q', branch], identityEnv(codeDir))
   } catch {
-    writeJsonAtomic(syncState(root, name), { branch, target, path })
-    return { conflict: true, message: `${name}: memory from ${branch} conflicts with ${target}. Resolve the files in ${path}, then run enki memory sync again.` }
+    settled = settleOldNotes(path, branch)
+    if (settled.length > 0 && conflicts(path).size === 0) gitEnv(path, ['commit', '-q', '--no-edit'], identityEnv(codeDir))
+    else {
+      writeJsonAtomic(syncState(root, name), { branch, target, path })
+      return { conflict: true, message: `${name}: memory from ${branch} conflicts with ${target}. Resolve the files in ${path}, then run enki memory sync again.` }
+    }
   }
   git(dir, ['worktree', 'remove', '--force', path])
-  return { conflict: false }
+  return { conflict: false, note: settledNote(settled, branch) }
 }
 
 /** Finishes a merge the user resolved, or reports that it's still waiting. */
@@ -245,15 +320,18 @@ function resumePending(root, name, dir, codeDir) {
     rmSync(file)
     return null
   }
-  // Git lists a file as conflicted until it's staged, so "resolved" means no conflict markers left.
-  const conflicted = (git(pending.path, ['diff', '--name-only', '--diff-filter=U'], { allowFail: true }) ?? '').split('\n').filter(Boolean)
-  const unresolved = conflicted.filter(file => /^(<{7}|>{7}) /m.test(readFileSync(join(pending.path, file), 'utf8'))).join('\n')
-  if (unresolved) return { blocked: true, message: `${name}: memory merge of ${pending.branch} still has conflicts in ${pending.path}: ${unresolved.split('\n').join(', ')}` }
+  const settled = settleOldNotes(pending.path, pending.branch)
+  // Git lists a file as conflicted until it's staged, so "resolved" means no conflict markers left. A file
+  // one side deleted has no markers: it's resolved once it's gone, or staged to keep it.
+  const unresolved = [...conflicts(pending.path)]
+    .filter(([file, stage]) => existsSync(join(pending.path, file)) && (!stage[2] || !stage[3] || /^(<{7}|>{7}) /m.test(readFileSync(join(pending.path, file), 'utf8'))))
+    .map(([file, stage]) => (stage[2] && stage[3] ? file : `${file} (deleted on one side: delete it, or git add it to keep it)`))
+  if (unresolved.length > 0) return { blocked: true, message: `${name}: memory merge of ${pending.branch} still has conflicts in ${pending.path}: ${unresolved.join(', ')}` }
   git(pending.path, ['add', '-A'])
   gitEnv(pending.path, ['commit', '-q', '--no-edit'], identityEnv(codeDir))
   git(dir, ['worktree', 'remove', '--force', pending.path])
   rmSync(file)
-  return { blocked: false, message: `${name}: finished merging memory from ${pending.branch}.` }
+  return { blocked: false, message: `${name}: finished merging memory from ${pending.branch}.${settledNote(settled, pending.branch)}` }
 }
 
 /** Has the code commit reached `branch`? By ancestry, or by the same patch (rebase, squash of one commit). */
@@ -303,7 +381,7 @@ export function syncMemory(root, { only, target: into = null } = {}) {
         blocked = true
         break
       }
-      lines.push(`${repo.name}: merged memory from ${branch} into ${target}.`)
+      lines.push(`${repo.name}: merged memory from ${branch} into ${target}.${merged.note}`)
     }
   }
   return { lines, blocked }
@@ -321,8 +399,6 @@ function unmergedTaskBranches(root, codeDir) {
     .map(tree => tree.branch)
 }
 
-const NOTES_TEMPLATE = name => `# ${name}: notes\n\nWhat enki has learned about this repo. Updated by the orchestrator at the end of each task, on the task's branch.\n\n## Overview\n\n## Key files and architecture\n\n## Conventions\n\n## Testing\n\n## Known pre-existing test failures\n\n## Gotchas\n`
-
 /** Moves a project's notes, repo settings and playbook into each repo's memory, in either mode. */
 export function migrate(root, mode) {
   if (!['repo', 'private'].includes(mode)) throw new MemoryError('Use: enki migrate --memory repo|private')
@@ -334,8 +410,9 @@ export function migrate(root, mode) {
     const name = repo.name ?? repo.path
     const codeDir = join(root, repo.path)
     const settings = Object.fromEntries(Object.entries(repo).filter(([key]) => !REPO_FIELDS_KEPT.includes(key)))
-    const notes = existsSync(legacyNotes(root, name)) ? readFileSync(legacyNotes(root, name), 'utf8') : NOTES_TEMPLATE(name)
-    const files = { 'notes.md': notes, 'repo.json': `${JSON.stringify(settings, null, 2)}\n` }
+    // Old notes stay as notes.md until a map task folds them into the map; a new repo starts with an empty map.
+    const memory = existsSync(legacyNotes(root, name)) ? { 'notes.md': readFileSync(legacyNotes(root, name), 'utf8') } : { 'map/README.md': STUB_ROOT(name) }
+    const files = { ...memory, 'repo.json': `${JSON.stringify(settings, null, 2)}\n` }
     if (repos.length === 1 && existsSync(projectPlaybook)) files['playbook.md'] = readFileSync(projectPlaybook, 'utf8')
     const unmerged = existsSync(codeDir) ? unmergedTaskBranches(root, codeDir) : []
     if (unmerged.length > 0) {
@@ -347,7 +424,10 @@ export function migrate(root, mode) {
       for (const [file, text] of Object.entries(files)) {
         if (existsSync(join(target, file)) && join(target, file) !== projectPlaybook) throw new MemoryError(`${join(target, file)} already exists. Nothing was changed for ${name}.`)
       }
-      for (const [file, text] of Object.entries(files)) writeFileSync(join(target, file), text)
+      for (const [file, text] of Object.entries(files)) {
+        mkdirSync(dirname(join(target, file)), { recursive: true })
+        writeFileSync(join(target, file), text)
+      }
       lines.push(`${name}: wrote ${Object.keys(files).join(', ')} to ${target}. Review them, then commit them to your current branch.`)
     } else {
       const branch = (existsSync(codeDir) && currentBranch(codeDir)) || 'main'

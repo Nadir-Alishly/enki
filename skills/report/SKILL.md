@@ -1,16 +1,21 @@
 ---
-description: Finishes an enki task by updating repo notes, writing the end-of-task report and rating the orchestration.
+description: Finishes an enki task by updating each repo's map (or notes), writing the end-of-task report and rating the orchestration.
 ---
 
 # Enki end-of-task report
 
-## 1. Update notes
+## 1. Update the map, or the notes
 
-Run `enki phase notes`. Update each repo's `notes.md` in the task's memory, at the path `enki status` gives, with what was learned from the scout's map and the agents' findings: architecture, key files, conventions, how to test the area, pitfalls, flaky tests, known failures.
+Run `enki phase notes`. Update each repo's memory in the task's copy, at the path `enki status` gives, with what was learned from the scout's report and the agents' findings: architecture, key files, conventions, how to test the area, pitfalls, flaky tests, known failures.
+
+- **A repo with a map** (`map/README.md`): edit the map files for the areas the task touched: their `## How it works`, `## Gotchas` and `Files:` line. A new area gets its own file and a line in its parent's `## Areas` list, the only place it's described. Repo-wide facts (stack, commands, conventions, known failures) go in the root, which every worker reads in full, so keep it under 3 KB. Run `enki memory check`: a broken link or an unlisted file stops the task at this step; split any file it warns is too big.
+- **`unmapped/` files** (`enki status` names them): what a branch older than the map added to the old notes. Check each against the code, fold what still holds into the map, and empty the file. Enki removes it at `enki phase done`.
+- **A map task:** read the mapper's reports. Tell the user what it dropped from the old notes, and why. Enki removes the old notes from the task's copy at `enki phase done`.
+- **A repo without a map** keeps its `notes.md`: update that.
 
 Record how the system starts and is tested if this task taught you anything new, and correct the repo's `repo.json` to match.
 
-Write only the task's copy, never the main tree's. It's committed with the task, and reaches the base branch only when the user merges, so an unmerged or abandoned task never leaves wrong notes behind. For a change to a contract between repos, such as an API, record each side in its own repo's notes: what the backend provides, and how the frontend uses it.
+Write only the task's copy, never the main tree's. It's committed with the task, and reaches the base branch only when the user merges, so an unmerged or abandoned task never leaves wrong notes behind. For a change to a contract between repos, such as an API, describe it once in the map of the repo that owns it, and link to it from the others as `repo:path` (for example `melda-server:api/livekit.md`). In notes, record each side in its own repo.
 
 Keep entries short and factual. Fix or delete entries that turned out wrong. Don't log task history: git has that. Update `.enki/config.json` if anything about a repo changed.
 

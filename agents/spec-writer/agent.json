@@ -1,0 +1,25 @@
+{
+  "id": "spec-writer",
+  "name": "Spec writer",
+  "type": "spec",
+  "capabilities": {
+    "write": "none",
+    "blind": false,
+    "browser": false,
+    "server": false,
+    "specs": true
+  },
+  "outcomes": [
+    {
+      "id": "ready",
+      "description": "The spec is written and complete: it goes to the user for approval"
+    },
+    {
+      "id": "questions",
+      "description": "The spec needs answers only the user can give: the questions are in the report"
+    }
+  ],
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "timeout": 1800000
+}

@@ -28,6 +28,8 @@ function deny(reason) {
 function repairsConfig() {
   const path = input.tool_input?.file_path
   if (path && basename(path) === 'config.json' && basename(dirname(path)) === '.enki') return true
+  // A repo's settings live in its memory's repo.json: in <repo>/.enki, or a private memory checkout.
+  if (path && basename(path) === 'repo.json' && (basename(dirname(path)) === '.enki' || basename(dirname(path)).endsWith('.memory'))) return true
   return input.tool_name === 'Bash' && /^enki\s+(validate|doctor)\b/.test(input.tool_input?.command ?? '')
 }
 
@@ -73,7 +75,7 @@ function run() {
     return
   }
 
-  // The orchestrator only carries the plan: what the user approves is the planner's, word for word.
+  // The orchestrator only carries the spec and the plan: what the user approves is the spec writer's or the planner's, word for word.
   if (!worker && state && input.tool_name === 'ExitPlanMode') {
     const problem = planCheck(state, typeof input.tool_input?.plan === 'string' ? input.tool_input.plan : null)
     if (problem) {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
-import { fullPlan, makeProject } from './helpers/harness.mjs'
+import { DEFAULT_SPEC, fullPlan, makeProject } from './helpers/harness.mjs'
 
 const started = (project, slug = 'demo') => {
   const result = project.enki(['task', 'new', slug])
@@ -30,10 +30,10 @@ test('task new creates state, a verified grid and the steps before the plan, and
   assert.equal(state.approved, false)
   assert.equal(state.orchestratorPane, 'w1:orch')
   assert.deepEqual(state.repos[0], { name: 'web', workdir: join(project.root, 'web'), url: 'http://localhost:4321', port: 4321, testGlobs: ['tests/**'] })
-  assert.deepEqual(Object.keys(state.herdr.panes).sort(), ['coder', 'planner', 'qa', 'reviewer', 'scout', 'tester'])
-  assert.deepEqual(Object.keys(state.agents), ['scout', 'planner'])
+  assert.deepEqual(Object.keys(state.herdr.panes).sort(), ['coder', 'planner', 'qa', 'reviewer', 'scout', 'spec-writer', 'tester'])
+  assert.deepEqual(Object.keys(state.agents), ['scout', 'spec-writer', 'planner'])
   assert.ok(existsSync(join(project.taskDir('demo'), 'rules.md')))
-  assert.equal(project.herdr.calls('agent', 'start').length, 2)
+  assert.equal(project.herdr.calls('agent', 'start').length, 3)
   assert.deepEqual(state.run.steps.scout.inputs, [{ from: 'request' }], 'Start passed the request on: the scout is queued')
   assert.match(project.enki(['next']).out, /scout: ready, visit 1\. Sent by the user's request/)
 })
@@ -131,7 +131,7 @@ test('the team cannot start before approval', () => {
   const result = project.enki(['team', 'start'])
   assert.notEqual(result.code, 0)
   assert.match(result.err, /isn't approved/)
-  assert.equal(project.herdr.calls('agent', 'start').length, 2)
+  assert.equal(project.herdr.calls('agent', 'start').length, 3)
 })
 
 test('a role cannot be started around the gate', () => {
@@ -181,7 +181,7 @@ test('a request is written before the first step works', () => {
 test('the planner’s questions go to the user through the orchestrator, and it resumes with the answers', () => {
   const project = started(makeProject())
   project.herdr.script(script => { script.report = { 'planner-demo': ['questions'] } })
-  project.enki(['ask', 'scout', project.brief()])
+  project.specApproved()
   const asked = project.enki(['ask', 'planner', project.brief()])
   assert.match(asked.out, /planner has questions only the user can answer: .*planner-r1\.md\. Ask the user them with AskUserQuestion/)
   assert.match(asked.out, /enki resume planner --note "answers added to request\.md"/)
@@ -191,6 +191,7 @@ test('the planner’s questions go to the user through the orchestrator, and it 
   const envelope = envelopeOf(project, 'planner-demo', 1)
   assert.match(envelope, /The user's request, with every answer they have given since: .*request\.md/)
   assert.match(envelope, /From the orchestrator: answers added to request\.md/)
+  assert.match(envelope, /The spec the user approved: .*spec\.md/, 'the planner plans from the approved spec')
 })
 
 test('the planner learns the workflow from its graph: never from its description, which agents can’t read', () => {
@@ -203,12 +204,12 @@ test('the planner learns the workflow from its graph: never from its description
     id: 'lean',
     name: 'Lean',
     nodes: full.nodes.filter(node => !['tester', 'qa', 'reviewer'].includes(node.id)),
-    edges: [...full.edges.filter(edge => ['start', 'scout', 'planner', 'approval'].includes(edge.from)).map(edge => (edge.from === 'approval' && edge.on === 'approved' ? { ...edge, to: 'coder' } : edge)), { from: 'coder', on: 'done', to: 'verify' }, { from: 'verify', on: 'pass', to: 'end' }],
+    edges: [...full.edges.filter(edge => ['start', 'scout', 'spec-writer', 'spec-approval', 'planner', 'approval'].includes(edge.from)).map(edge => (edge.from === 'approval' && edge.on === 'approved' ? { ...edge, to: 'coder' } : edge)), { from: 'coder', on: 'done', to: 'verify' }, { from: 'verify', on: 'pass', to: 'end' }],
   }
   writeFileSync(join(project.root, '.enki/workflows/lean.json'), JSON.stringify(lean))
   project.enki(['task', 'new', 'demo', '--workflow', 'lean'])
   assert.equal(JSON.parse(readFileSync(join(project.taskDir('demo'), 'workflow.json'), 'utf8')).description, undefined, 'the task’s copy has no description')
-  project.enki(['ask', 'scout', project.brief()])
+  project.specApproved()
   project.report('demo', 'planner-r1.md', fullPlan('# Plan\n\n1. [Coder] Add the toggle and its tests\n'))
   const asked = project.enki(['ask', 'planner', project.brief()])
   const envelope = envelopeOf(project, 'planner-demo', 0)
@@ -235,7 +236,7 @@ test('the planner learns the workflow from its graph: never from its description
 test('a plan that isn’t the planner’s can’t be presented or approved', () => {
   const project = started(makeProject())
   const early = project.hook('pre-tool-use', { tool_name: 'ExitPlanMode', tool_input: { plan: '# My plan' } })
-  assert.match(JSON.stringify(early.json), /No plan is waiting for approval.*never writes one itself/)
+  assert.match(JSON.stringify(early.json), /Nothing is waiting for approval.*never writes either itself/)
   const plan = project.planReady('# Plan\n\nAdd a button.\n')
   const edited = project.hook('pre-tool-use', { tool_name: 'ExitPlanMode', tool_input: { plan: `${plan}\nAlso rewrite the API.` } })
   assert.match(JSON.stringify(edited.json), /isn't the planner's plan as written/)
@@ -268,13 +269,15 @@ test('a worker cannot approve a plan', () => {
 test('the user’s changes send the plan back to the planner, before approval or after it', () => {
   const project = started(makeProject())
   project.planReady()
-  assert.match(project.enki(['outcome', 'approval', 'changes', '--note', 'x']).err, /the user's decision/)
+  assert.match(project.enki(['outcome', 'approval', 'change-plan', '--note', 'x']).err, /the user's decision/)
   assert.match(project.enki(['outcome', 'approval', 'approved', '--by', 'user']).err, /only by accepting the plan dialog/)
-  assert.match(project.enki(['outcome', 'approval', 'changes', '--by', 'user']).err, /in their words/)
-  const back = project.enki(['outcome', 'approval', 'changes', '--by', 'user', '--note', 'Keep the old URL'])
+  assert.match(project.enki(['outcome', 'approval', 'changes', '--by', 'user', '--note', 'x']).err, /change-plan .* or enki outcome approval change-spec/, 'changes are to the plan or to the spec')
+  assert.match(project.enki(['outcome', 'approval', 'change-plan', '--by', 'user']).err, /in their words/)
+  const back = project.enki(['outcome', 'approval', 'change-plan', '--by', 'user', '--note', 'Keep the old URL'])
   assert.equal(back.code, 0, back.err)
-  assert.match(back.out, /changes → planner/)
-  assert.equal(project.state('demo').phase, 'intake')
+  assert.match(back.out, /change-plan → planner/)
+  assert.equal(project.state('demo').phase, 'planning', 'the spec stays approved')
+  assert.equal(project.state('demo').specApproved, true)
   project.report('demo', 'planner-r2.md', fullPlan('# Plan, with the old URL\n'))
   assert.equal(project.enki(['ask', 'planner', project.brief()]).code, 0)
   assert.match(envelopeOf(project, 'planner-demo', -1), /The user asked for changes to the plan \(.*planner-r1\.md\): Keep the old URL\. Write the whole plan again/)
@@ -283,12 +286,72 @@ test('the user’s changes send the plan back to the planner, before approval or
   // After approval, the same: the work stops, and the new plan needs its own approval.
   project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: readFileSync(join(project.taskDir('demo'), 'planner-r2.md'), 'utf8') }, noAutoSteps: true })
   assert.equal(project.state('demo').approved, true)
-  assert.match(project.enki(['phase', 'planning']).err, /enki outcome approval changes --by user/)
-  assert.equal(project.enki(['outcome', 'approval', 'changes', '--by', 'user', '--note', 'Smaller, please']).code, 0)
+  assert.match(project.enki(['phase', 'planning']).err, /enki outcome approval change-plan/)
+  assert.equal(project.enki(['outcome', 'approval', 'change-plan', '--by', 'user', '--note', 'Smaller, please']).code, 0)
   const state = project.state('demo')
   assert.equal(state.approved, false)
   assert.deepEqual(Object.entries(state.run.steps).filter(([, step]) => step.status !== 'idle').map(([id]) => id), ['planner'])
   assert.notEqual(project.enki(['phase', 'coding']).code, 0)
+})
+
+test('the spec is approved first, through the same dialog, and the user can send it back', () => {
+  const project = started(makeProject())
+  project.enki(['ask', 'scout', project.brief()])
+  project.report('demo', 'spec-writer-r1.md', '# Spec\n\n## Goal\n\nA button.\n')
+  const incomplete = project.enki(['ask', 'spec-writer', project.brief()])
+  assert.match(incomplete.out, /the spec can't go to the user yet: it has no "## Acceptance criteria", "## Public interface" sections/)
+  assert.match(incomplete.out, /Don't fix the spec yourself/)
+  project.enki(['resume', 'spec-writer', '--note', 'Add the sections.'])
+  const spec = '# Spec\n\n## Goal\n\nA button.\n\n## Acceptance criteria\n\n1. It shows.\n\n## Public interface\n\n#go\n'
+  project.report('demo', 'spec-writer-r2.md', spec)
+  assert.equal(project.enki(['ask', 'spec-writer', project.brief()]).code, 0)
+  assert.equal(project.state('demo').phase, 'spec')
+  assert.match(project.enki(['next']).out, /Spec approval: the spec waits for the user\. Present .*spec-writer-r2\.md exactly as written/)
+  assert.match(JSON.stringify(project.hook('pre-tool-use', { tool_name: 'ExitPlanMode', tool_input: { plan: `${spec}\nAlso a form.` } }).json), /isn't the spec writer's spec as written/)
+  assert.match(project.enki(['ask', 'planner', project.brief()]).err, /no spec|nothing has sent work/i, 'the planner waits for the approved spec')
+
+  // The user sends it back, in their words.
+  assert.match(project.enki(['outcome', 'spec-approval', 'change-spec', '--by', 'user', '--note', 'x']).err, /spec-approval changes/)
+  assert.equal(project.enki(['outcome', 'spec-approval', 'changes', '--by', 'user', '--note', 'Blue, please']).code, 0)
+  assert.equal(project.state('demo').phase, 'intake')
+  project.report('demo', 'spec-writer-r3.md', spec.replace('A button.', 'A blue button.'))
+  assert.equal(project.enki(['ask', 'spec-writer', project.brief()]).code, 0)
+  assert.match(envelopeOf(project, 'spec-writer-demo', -1), /The user asked for changes to the spec \(.*spec-writer-r2\.md\): Blue, please\. Write the whole spec again/)
+
+  const approved = project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: spec.replace('A button.', 'A blue button.') }, noAutoSteps: true })
+  assert.match(approved.json.hookSpecificOutput.additionalContext, /recorded the approved spec .* saved as spec\.md/)
+  const state = project.state('demo')
+  assert.deepEqual([state.specApproved, state.approved, state.phase], [true, false, 'planning'])
+  assert.match(readFileSync(join(project.taskDir('demo'), 'spec.md'), 'utf8'), /A blue button/)
+  assert.equal(state.run.steps.planner.status, 'queued')
+  assert.match(project.enki(['outcome', 'spec-approval', 'changes', '--by', 'user', '--note', 'x']).err, /already approved.*approval change-spec/)
+})
+
+test('changes to the spec at plan approval, or a plan that can’t meet it, need the spec approved again', () => {
+  const project = started(makeProject())
+  project.planReady()
+  const back = project.enki(['outcome', 'approval', 'change-spec', '--by', 'user', '--note', 'Only on mobile'])
+  assert.equal(back.code, 0, back.err)
+  assert.match(back.out, /change-spec → spec-writer/)
+  let state = project.state('demo')
+  assert.deepEqual([state.specApproved, state.approved, state.phase], [false, false, 'intake'])
+  assert.deepEqual(Object.entries(state.run.steps).filter(([, step]) => step.status !== 'idle').map(([id]) => id), ['spec-writer'])
+  project.report('demo', 'spec-writer-r2.md', DEFAULT_SPEC.replace('The work.', 'The work, on mobile.'))
+  project.enki(['ask', 'spec-writer', project.brief()])
+  assert.match(envelopeOf(project, 'spec-writer-demo', -1), /The user asked for changes to the spec, when they saw the plan .*: Only on mobile/)
+  project.hook('post-tool-use', { tool_name: 'ExitPlanMode', tool_response: { plan: DEFAULT_SPEC.replace('The work.', 'The work, on mobile.') }, noAutoSteps: true })
+  assert.equal(project.state('demo').specApproved, true)
+
+  // The planner finds the new spec can't be met: back to the spec writer, never planned around.
+  project.herdr.script(script => { script.report = { 'planner-demo': ['spec'] } })
+  project.report('demo', 'planner-r2.md', 'Mobile has no such screen.\n')
+  const cant = project.enki(['ask', 'planner', project.brief()])
+  assert.match(cant.out, /spec → spec-writer/)
+  assert.match(envelopeOf(project, 'planner-demo', -1), /The spec the user approved, changed since your last plan/)
+  state = project.state('demo')
+  assert.deepEqual([state.specApproved, state.phase], [false, 'intake'])
+  project.enki(['ask', 'spec-writer', project.brief()])
+  assert.match(envelopeOf(project, 'spec-writer-demo', -1), /planner can't meet the approved spec, for the reasons in .*planner-r2\.md/)
 })
 
 // Asking workers

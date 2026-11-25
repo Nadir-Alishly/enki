@@ -3,11 +3,15 @@
 import { createAgents } from './agents.js'
 import { arrowDefs, autoLayout, drawGraph } from './graph.js'
 import { createLibrary } from './library.js'
+import { createMap } from './map.js'
 import { createSettings } from './settings.js'
 import { createStudio } from './studio.js'
 
 /** A stripe for a patterned role, as QA's, in its own color. */
 const stripes = color => `repeating-linear-gradient(135deg, ${color} 0 4px, var(--black-950) 4px 7px)`
+
+/** Stripes both ways, as the spec writer's. */
+const cross = color => `repeating-linear-gradient(45deg, ${color} 0 3px, transparent 3px 7px), repeating-linear-gradient(135deg, ${color} 0 3px, var(--black-950) 3px 7px)`
 
 /** A dashed outline in a role's color, as a background, so it works wherever a fill does. */
 const dashed = color =>
@@ -40,7 +44,7 @@ function learnRoles(styles) {
       continue
     }
     const color = style.color ?? BUILTIN_ROLE[style.role]?.line ?? (BUILTIN_ROLE[style.role]?.fill?.startsWith('var(') ? BUILTIN_ROLE[style.role].fill : null) ?? 'var(--border)'
-    learnedRoles[id] = { label: style.label ?? id, fill: style.pattern === 'stripes' ? stripes(color) : style.pattern === 'dashed' ? dashed(color) : color, deep: 'var(--black-950)', line: color, pattern: style.pattern ?? null }
+    learnedRoles[id] = { label: style.label ?? id, fill: style.pattern === 'stripes' ? stripes(color) : style.pattern === 'cross' ? cross(color) : style.pattern === 'dashed' ? dashed(color) : color, deep: 'var(--black-950)', line: color, pattern: style.pattern ?? null }
   }
 }
 
@@ -48,7 +52,11 @@ function learnRoles(styles) {
 const roleOf = id => learnedRoles[id] ?? BUILTIN_ROLE[id] ?? { label: id, fill: 'var(--border)', deep: 'var(--black-950)', line: 'var(--border)' }
 
 /** The chart's roles: enki's own first, in their order, then the project's own. */
-const chartRoles = project => [...ROLE_ORDER, ...Object.keys(project.roles ?? {}).filter(id => !ROLE_ORDER.includes(id))]
+// The spec writer's type comes from the server, and sits between the scout and the planner when a task used it.
+const chartRoles = project => {
+  const order = ROLE_ORDER.flatMap(id => (id === 'scout' && project.roles?.spec ? [id, 'spec'] : [id]))
+  return [...order, ...Object.keys(project.roles ?? {}).filter(id => !order.includes(id))]
+}
 
 const AGENT_STATE = {
   running: { label: 'Running', color: 'var(--green)', pulse: true },
@@ -104,6 +112,11 @@ const library = createLibrary({
   learnRoles: styles => learnRoles(styles),
   roleOf: id => roleOf(id),
   editHref: (id, workflow) => editHref(id, workflow),
+})
+
+const map = createMap({
+  h: (...args) => h(...args),
+  getJson: path => getJson(path),
 })
 
 const settings = createSettings({
@@ -225,9 +238,11 @@ function ago(iso) {
   if (ms < 60000) return 'just now'
   if (ms < 3600000) return `${Math.floor(ms / 60000)}m ago`
   if (ms < 86400000) return `${Math.floor(ms / 3600000)}h ago`
+  // By calendar day, as the token chart counts them.
   const date = new Date(iso)
-  if (ms < 2 * 86400000) return 'yesterday'
-  if (ms < 7 * 86400000) return WEEKDAYS[date.getDay()]
+  const days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(iso).setHours(0, 0, 0, 0)) / 86400000)
+  if (days === 1) return 'yesterday'
+  if (days < 7) return WEEKDAYS[date.getDay()]
   return `${MONTHS[date.getMonth()]} ${date.getDate()}`
 }
 
@@ -264,6 +279,7 @@ function route() {
     task: parts[2] === 't' ? parts[3] : null,
     settings: parts[2] === 'settings',
     library: parts[2] === 'library',
+    map: parts[2] === 'map',
     edit: parts[2] === 'workflows' ? parts[3] ?? null : null,
     // The Agents page: the list, one agent's editor, or a new one.
     agents: parts[2] === 'agents' ? { id: parts[3] ?? null } : parts[2] === 'new-agent' ? { id: '+new' } : null,
@@ -274,6 +290,7 @@ const projectHref = id => `#/p/${encodeURIComponent(id)}`
 const taskHref = (project, task) => `${projectHref(project)}/t/${encodeURIComponent(task)}`
 const settingsHref = id => `${projectHref(id)}/settings`
 const libraryHref = id => `${projectHref(id)}/library`
+const mapHref = id => `${projectHref(id)}/map`
 const agentsHref = id => `${projectHref(id)}/agents`
 const agentHref = (id, agent) => `${agentsHref(id)}/${encodeURIComponent(agent)}`
 const newAgentHref = id => `${projectHref(id)}/new-agent`
@@ -311,11 +328,13 @@ async function load() {
     const projectId = r.project ?? list.projects[0]?.id
     const entry = list.projects.find(p => p.id === projectId)
     // The settings page loads its own data, and keeps it while live updates come in.
-    const project = !entry ? null : r.settings || r.library || r.edit || r.agents ? { id: entry.id, name: entry.name } : await getJson(`/api/projects/${encodeURIComponent(projectId)}`)
+    const project = !entry ? null : r.settings || r.library || r.edit || r.agents || r.map ? { id: entry.id, name: entry.name } : await getJson(`/api/projects/${encodeURIComponent(projectId)}`)
     const task = project && r.task ? await getJson(`/api/projects/${encodeURIComponent(project.id)}/tasks/${encodeURIComponent(r.task)}`).catch(() => null) : null
     learnRoles(project?.roles)
     learnRoles(task?.roles)
     if (ticket !== loading) return
+    // The map page keeps its own data, and reloads it when the project changes.
+    if (project && r.map) map.refresh(project.id)
     Object.assign(view, { projects: list.projects, herdr: list.herdr, project, task, error: null })
   } catch (error) {
     if (ticket !== loading) return
@@ -349,7 +368,7 @@ function renderSidebar() {
                 'aria-selected': String(selected),
                 onClick: () => {
                   view.menuOpen = false
-                  location.hash = r.settings ? settingsHref(project.id) : projectHref(project.id)
+                  location.hash = r.settings ? settingsHref(project.id) : r.map ? mapHref(project.id) : projectHref(project.id)
                 },
               },
               h('span', { class: 'option__text' }, h('span', { class: 'option__name' }, project.name), h('span', { class: 'option__sub' }, sub)),
@@ -382,7 +401,7 @@ function renderSidebar() {
     nodes.push(
       h(
         'a',
-        { class: 'navitem', href: projectHref(current.id), 'aria-current': r.task || r.settings || r.library || r.edit || r.agents ? null : 'page' },
+        { class: 'navitem', href: projectHref(current.id), 'aria-current': r.task || r.settings || r.library || r.edit || r.agents || r.map ? null : 'page' },
         svg(16, [['rect', { x: 1.5, y: 1.5, width: 13, height: 13 }], ['path', { d: 'M1.5 6.5h13M6.5 6.5v8' }]], { width: 1 }),
         'Project overview',
       ),
@@ -447,6 +466,12 @@ function renderSidebar() {
       h(
         'div',
         { class: 'side__foot' },
+        h(
+          'a',
+          { class: 'navitem', href: mapHref(current.id), 'aria-current': r.map ? 'page' : null },
+          svg(16, [['circle', { cx: 8, cy: 8, r: 2.5 }], ['circle', { cx: 2.5, cy: 3, r: 1.5 }], ['circle', { cx: 13.5, cy: 4, r: 1.5 }], ['circle', { cx: 4, cy: 13.5, r: 1.5 }], ['path', { d: 'M3.6 4.1l2.6 2.3M12.2 4.8l-2.1 1.9M5 12.4l1.4-2.3' }]], { width: 1.2 }),
+          h('span', { class: 'navitem__text' }, 'Codebase map'),
+        ),
         h(
           'a',
           { class: 'navitem', href: libraryHref(current.id), 'aria-current': r.library || r.edit ? 'page' : null },
@@ -748,7 +773,7 @@ function renderTask(task) {
             ),
           ),
         )
-      : h('p', { class: 'empty' }, task.phase === 'intake' || task.phase === 'planning' ? 'The plan appears here once it is approved.' : 'This task was planned before enki recorded steps.'),
+      : h('p', { class: 'empty' }, ['intake', 'spec', 'planning'].includes(task.phase) ? 'The plan appears here once it is approved.' : 'This task was planned before enki recorded steps.'),
   )
 
   const feed = h(
@@ -1054,17 +1079,19 @@ function render() {
   else if (r.library) content = [library.mount(view.project.id, view.project.name)]
   else if (r.edit) content = [studio.mount(view.project.id, r.edit)]
   else if (r.agents) content = [agents.mount(view.project.id, r.agents.id, view.project.name)]
+  else if (r.map) content = [map.mount(view.project.id)]
   else content = view.task ? renderTask(view.task) : renderProject(view.project)
   // The settings page is the same element each time, so re-renders never touch what's being typed.
   // The studio is one screen: it fills the pane instead of scrolling in it.
   main.classList.toggle('mainpane--studio', Boolean(r.edit && view.project))
+  main.classList.toggle('mainpane--map', Boolean(r.map && view.project))
   // The canvas gets the whole width: the studio has its own way back.
   document.querySelector('.shell')?.classList.toggle('shell--studio', Boolean(r.edit && view.project))
   const nodes = content.filter(Boolean)
   if (!(nodes.length === 1 && main.childElementCount === 1 && main.firstElementChild === nodes[0])) main.replaceChildren(...nodes)
   applyFocus()
   fitTasks()
-  document.title = r.settings && view.project ? `Settings · ${view.project.name} · Enki` : (r.library || r.edit) && view.project ? `Workflows · ${view.project.name} · Enki` : r.agents && view.project ? `Agents · Enki` : view.task ? `${view.task.title} · Enki` : view.project ? `${view.project.name} · Enki` : 'Enki dashboard'
+  document.title = r.settings && view.project ? `Settings · ${view.project.name} · Enki` : (r.library || r.edit) && view.project ? `Workflows · ${view.project.name} · Enki` : r.agents && view.project ? `Agents · Enki` : r.map && view.project ? `Map · ${view.project.name} · Enki` : view.task ? `${view.task.title} · Enki` : view.project ? `${view.project.name} · Enki` : 'Enki dashboard'
 }
 
 function connect() {

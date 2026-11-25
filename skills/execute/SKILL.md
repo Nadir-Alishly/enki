@@ -10,15 +10,16 @@ Write each brief to `<task folder>/briefs/`, and run every `enki ask` with `run_
 
 What goes in a brief:
 
-- **Steps that see the work** (enki's coder and reviewer, and any agent that isn't blind): the plan steps it works on, the approved plan and scout report paths, and the relevant notes. When findings sent a step back, consolidate them: describe each failure scenario and its constraint, and let the coder choose the fix. Prescribe a fix only if a reviewer proposed it, and ask the coder to consider adversarial cases. For visual work, say the coder must read QA's screenshots before each tuning pass.
+- **Steps that see the work** (enki's coder and reviewer, and any agent that isn't blind): the plan steps it works on, the approved plan and scout report paths, and the map area files that matter (or the relevant notes). When findings sent a step back, consolidate them: describe each failure scenario and its constraint, and let the coder choose the fix. Prescribe a fix only if a reviewer proposed it, and ask the coder to consider adversarial cases. For visual work, say the coder must read QA's screenshots before each tuning pass.
 - **Test accounts and other secrets the user gives:** never write one into a brief or any file (enki refuses). Store each with `enki secret set <name> <value>`, then name it in the brief: the agent reads it with `enki secret get <name>`. Enki keeps stored values out of its logs.
-- **Blind steps** (enki's tester and QA): point to `requirements.md` and describe behaviour only. Never paste code, diffs or other steps' reports into them. For QA, give an explicit list of what to check, including what a fix must not disturb.
+- **The mapper** (the map workflow): one visit per top-level area. Brief one `[Mapper]` plan step at a time, with `--step N`; it reports `more` until the outline is done. This is the one exception to one visit doing all a step's plan steps.
+- **Blind steps** (enki's tester and QA): point to `spec.md` and describe behaviour only. They may read the map too. Never paste code, diffs or other steps' reports into them. For QA, give an explicit list of what to check, including what a fix must not disturb.
 
 ## 1. Baseline
 
-1. Run `enki team start`. It starts every step of the workflow. If it says Playwright or a browser is missing, ask the user before running the `enki playwright install` command it names, because it downloads software. If it says nobody has recorded the start command, work it out from the scout report, correct `.enki/config.json` and the notes, then run it again. If it says the workflow can't run, the plan needs fixing: tell the user, and with their words send it back to the planner (`enki outcome approval changes --by user --note "..."`). If it exits 3, a folder trust prompt is waiting: ask the user whether to trust the folder, and if they agree, run `enki answer <step> trust`, then `enki start <step>`.
+1. Run `enki team start`. It starts every step of the workflow. If it says Playwright or a browser is missing, ask the user before running the `enki playwright install` command it names, because it downloads software. If it says nobody has recorded the start command, work it out from the scout report, correct `.enki/config.json` and the notes, then run it again. If it says the workflow can't run, the plan needs fixing: tell the user, and with their words send it back to the planner (`enki outcome approval change-plan --by user --note "..."`). If it exits 3, a folder trust prompt is waiting: ask the user whether to trust the folder, and if they agree, run `enki answer <step> trust`, then `enki start <step>`.
 2. Run `git status` in the affected repos. Dirty files are the user's own: leave them alone.
-3. Run `enki phase baseline`, then `enki verify --baseline`. If it fails, have a step that writes tests sort stable pre-existing failures from flaky ones, once the workflow sends it work, and add them to the repo notes. A brand-new repo has nothing to run.
+3. Run `enki phase baseline`, then `enki verify --baseline`. If it fails, have a step that writes tests sort stable pre-existing failures from flaky ones, once the workflow sends it work, and add them to the map's root (or the notes). A brand-new repo has nothing to run.
 
 ## 2. Run the workflow
 
@@ -47,7 +48,7 @@ An outcome the workflow doesn't wire anywhere comes to you, the orchestrator: QA
 
 A loop that hit its limit can only go on through the user. A step handed to you more than its limit (2 by default) stops the task: tell the user what's open.
 
-If an agent finds the plan is wrong, pause and tell the user. With their words, send it back to the planner: `enki outcome approval changes --by user --note "<their words>"`. That stops the work on the old plan once nothing is running, and the planner's new plan needs the user's approval through plan mode, as in **enki:task**.
+If an agent finds the plan is wrong, pause and tell the user. With their words, send it back to the planner: `enki outcome approval change-plan --by user --note "<their words>"`. If what's wrong is what was asked for, not how, it goes to the spec writer instead: `enki outcome approval change-spec --by user --note "<their words>"`. Either stops the work on the old plan once nothing is running, and what comes back needs the user's approval through plan mode, as in **enki:task**.
 
 ## 4. Finish
 

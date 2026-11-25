@@ -1,6 +1,6 @@
 // The order of work, and what each role is allowed to see.
 import assert from 'node:assert/strict'
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { fullPlan, makeProject } from './helpers/harness.mjs'
@@ -16,7 +16,6 @@ function ready(plan, config) {
   assert.equal(project.enki(['task', 'new', 'demo']).code, 0)
   project.approve(plan)
   assert.equal(project.enki(['team', 'start']).code, 0)
-  project.report('demo', 'requirements.md', '# Requirements\n')
   project.report('demo', 'tests.md')
   return project
 }
@@ -56,7 +55,7 @@ test('the tester and coder can start at the same time', () => {
 
 test('the team starts together, and everyone reports', () => {
   const project = ready()
-  assert.deepEqual(Object.keys(project.state('demo').agents).sort(), ['coder', 'planner', 'qa', 'reviewer', 'scout', 'tester'])
+  assert.deepEqual(Object.keys(project.state('demo').agents).sort(), ['coder', 'planner', 'qa', 'reviewer', 'scout', 'spec-writer', 'tester'])
 })
 
 test('a startup failure in a parallel start still stops the team start', () => {
@@ -69,17 +68,18 @@ test('a startup failure in a parallel start still stops the team start', () => {
   assert.match(result.err, /qa-demo is waiting on a prompt/)
 })
 
-test('the tester and QA work from the requirements enki takes from the approved plan, not the plan', () => {
+test('the tester and QA work from the spec the user approved, not the plan', () => {
   const project = passing()
   project.enki(['task', 'new', 'demo'])
-  project.approve('# Plan\n\nThe approach: a secret.\n\n## Requirements\n\nUsers see a greeting.\n')
+  project.approve('# Plan\n\nThe approach: a secret.\n', {}, { spec: '# Spec\n\n## Goal\n\nA greeting.\n\n## Acceptance criteria\n\n1. Users see a greeting.\n\n## Public interface\n\nNone.\n' })
   project.enki(['team', 'start'])
-  const requirements = readFileSync(join(project.taskDir('demo'), 'requirements.md'), 'utf8')
-  assert.match(requirements, /Users see a greeting/)
-  assert.doesNotMatch(requirements, /secret/)
-  rmSync(join(project.taskDir('demo'), 'requirements.md'))
-  assert.match(askErr(project, 'tester'), /requirements\.md/)
-  project.report('demo', 'requirements.md')
+  const spec = readFileSync(join(project.taskDir('demo'), 'spec.md'), 'utf8')
+  assert.match(spec, /Users see a greeting/)
+  assert.doesNotMatch(spec, /secret/)
+  assert.equal(existsSync(join(project.taskDir('demo'), 'requirements.md')), false, 'the plan no longer carries requirements')
+  rmSync(join(project.taskDir('demo'), 'spec.md'))
+  assert.match(askErr(project, 'tester'), /spec\.md/)
+  project.report('demo', 'spec.md', spec)
   assert.equal(project.enki(['ask', 'tester', project.brief()]).code, 0)
 })
 
@@ -208,7 +208,7 @@ for (const plan of ['# Plan\n\nTeam: light\n', '# Plan\n\nReviewer: none\n', '# 
 test('a plan that skips the reviewer never reaches the user: the workflow would end without a check', () => {
   const project = passing()
   project.enki(['task', 'new', 'demo'])
-  assert.equal(ask(project, 'scout').code, 0)
+  project.specApproved()
   project.report('demo', 'planner-r1.md', fullPlan('# Plan\n\nSkip: reviewer\n'))
   const result = ask(project, 'planner')
   assert.match(result.out, /the plan can't go to the user yet: .*verify: "pass" goes nowhere/)
@@ -342,7 +342,7 @@ function blindProject() {
   project.enki(['task', 'new', 'demo'])
   project.approve()
   project.enki(['team', 'start'])
-  project.report('demo', 'requirements.md')
+  project.report('demo', 'spec.md')
   project.report('demo', 'tests.md')
   // The coder's round.
   project.write(join(project.root, 'web/src/old.js'), 'changed\n')
@@ -391,14 +391,14 @@ for (const role of ['tester', 'qa']) {
     for (const command of ['cat tests/new.test.js', 'git status', 'npm test', 'ls src']) assert.equal(bash(project, role, command), null, command)
   })
 
-  test(`${role}: the plan and other agents' reports are hidden, and requirements are not`, () => {
+  test(`${role}: the plan and other agents' reports are hidden, and the spec is not`, () => {
     const project = blindProject()
     const task = project.taskDir('demo')
-    for (const file of ['approved-plan.md', 'plan.md', 'planner-r1.md', 'scout-r1.md', 'coder-r1.md', 'reviewer-r1.md', 'role-coder.md', 'briefs/003-coder.prompt.md', 'briefs/coder-1.md']) {
+    for (const file of ['approved-plan.md', 'plan.md', 'planner-r1.md', 'spec-writer-r1.md', 'scout-r1.md', 'coder-r1.md', 'reviewer-r1.md', 'role-coder.md', 'briefs/003-coder.prompt.md', 'briefs/coder-1.md']) {
       assert.equal(read(project, role, join(task, file)), 'deny', file)
     }
     assert.equal(bash(project, role, `cat ${join(task, 'coder-r1.md')}`), 'deny')
-    for (const file of ['requirements.md', 'request.md', 'rules.md', 'briefs/001-tester.prompt.md']) {
+    for (const file of ['spec.md', 'request.md', 'rules.md', 'briefs/001-tester.prompt.md']) {
       assert.equal(read(project, role, join(task, file)), null, file)
     }
   })
@@ -449,12 +449,12 @@ test('the tester owns its test report', () => {
   assert.equal(write(project, 'coder', join(project.taskDir('demo'), 'tests.md')), 'deny')
 })
 
-test('nobody but the orchestrator can write requirements', () => {
+test('nobody writes the approved spec by hand: enki saves what the user approved', () => {
   const project = ready()
-  for (const role of ['tester', 'qa', 'coder', 'reviewer', 'scout', 'planner']) {
-    assert.equal(write(project, role, join(project.taskDir('demo'), 'requirements.md')), 'deny', role)
+  for (const role of ['tester', 'qa', 'coder', 'reviewer', 'scout', 'spec-writer', 'planner']) {
+    assert.equal(write(project, role, join(project.taskDir('demo'), 'spec.md')), 'deny', role)
   }
-  assert.equal(decision(project.hook('pre-tool-use', { tool_name: 'Write', tool_input: { file_path: join(project.taskDir('demo'), 'requirements.md') } })), null)
+  assert.equal(decision(project.hook('pre-tool-use', { tool_name: 'Write', tool_input: { file_path: join(project.taskDir('demo'), 'spec.md') } })), 'deny')
 })
 
 test('only QA gets the browser lock', () => {
@@ -465,27 +465,28 @@ test('only QA gets the browser lock', () => {
 
 // The grid
 
-test('the Full team makes three columns of two, in the workflow’s order', () => {
+test('the Full team makes columns of two in the workflow’s order, and its seventh agent a whole column', () => {
   const project = passing()
   project.enki(['task', 'new', 'demo'])
   const { panes } = project.state('demo').herdr
   const rect = role => project.herdr.read().panes[panes[role]].rect
-  for (const [top, below] of [['scout', 'planner'], ['coder', 'tester'], ['qa', 'reviewer']]) {
+  for (const [top, below] of [['scout', 'spec-writer'], ['planner', 'coder'], ['tester', 'qa']]) {
     assert.equal(rect(top).x, rect(below).x, `${below} under ${top}`)
     assert.ok(rect(below).y > rect(top).y)
   }
-  assert.ok(rect('scout').x < rect('coder').x && rect('coder').x < rect('qa').x)
+  assert.ok(rect('scout').x < rect('planner').x && rect('planner').x < rect('tester').x && rect('tester').x < rect('reviewer').x)
+  assert.equal(rect('reviewer').height, rect('scout').height * 2)
 })
 
-test('a workflow with an odd number of agents leaves the last column whole', () => {
+test('a workflow with an even number of agents fills every column', () => {
   const project = passing({ workflow: 'quick-fix' })
   project.enki(['task', 'new', 'demo'])
   const { panes } = project.state('demo').herdr
-  assert.deepEqual(Object.keys(panes).sort(), ['coder', 'planner', 'reviewer'])
+  assert.deepEqual(Object.keys(panes).sort(), ['coder', 'planner', 'reviewer', 'spec-writer'])
   const rect = role => project.herdr.read().panes[panes[role]].rect
-  assert.equal(rect('planner').x, rect('coder').x)
-  assert.ok(rect('reviewer').x > rect('planner').x)
-  assert.equal(rect('reviewer').height, rect('planner').height * 2)
+  assert.equal(rect('spec-writer').x, rect('planner').x)
+  assert.equal(rect('coder').x, rect('reviewer').x)
+  assert.ok(rect('coder').x > rect('planner').x)
 })
 
 test('a plan step the tests own moves with the test run: active, failed, then done', () => {
@@ -493,7 +494,7 @@ test('a plan step the tests own moves with the test run: active, failed, then do
   project.enki(['task', 'new', 'demo'])
   project.approve('# Plan\n\n1. [Tester] Write tests\n2. [Coder] Implement\n3. [verify] Run the tests\n4. [Orchestrator] Report\n')
   project.enki(['team', 'start'])
-  project.report('demo', 'requirements.md', '# Requirements\n')
+  project.report('demo', 'spec.md', '# Spec\n')
   const step3 = () => project.state('demo').steps.find(step => step.n === 3).status
   assert.equal(ask(project, 'coder', '--step', '2').code, 0)
   assert.equal(ask(project, 'tester', '--step', '1', '--report', 'tests.md').code, 0)
@@ -516,7 +517,7 @@ test('one visit does all of an agent’s plan steps, and a blocked visit leaves 
     project.enki(['task', 'new', 'demo'])
     project.approve(plan)
     project.enki(['team', 'start'])
-    project.report('demo', 'requirements.md', '# Requirements\n')
+    project.report('demo', 'spec.md', '# Spec\n')
     if (outcome) project.herdr.script(script => { script.report = { 'coder-demo': [outcome] } })
     return project
   }
