@@ -1,6 +1,6 @@
 // A small shell reader for policy checks. It finds the commands inside a Bash string,
 // including ones behind quotes, substitutions and wrappers. It is not a full parser:
-// see the README for what it can't see.
+// see docs/security.md for what it can't see.
 
 const WRAPPERS = new Set(['env', 'command', 'nohup', 'time', 'exec', 'nice', 'ionice', 'stdbuf', 'builtin'])
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'fish'])

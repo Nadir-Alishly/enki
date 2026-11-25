@@ -1,0 +1,32 @@
+# Dashboard
+
+Enki has a local web dashboard covering every enki project on this computer. Open it from any Claude Code session, in any folder:
+
+```
+! enki dashboard --open
+```
+
+The `enki` command isn't in your own terminal: see [the enki CLI](configuration.md#the-enki-cli). Any enki session or new task also starts it in the background, so it's usually already running at `http://localhost:4747/`.
+
+While an orchestrator has a task open, a band above its prompt shows the task and its phase, with a **Go to dashboard** button that opens the task's page. Collapse it with its `[-]`. Run from an orchestrator's pane, `enki dashboard --open` also opens that task's page, and `enki dashboard link` prints what the band shows. On KDE Plasma, where Wayland won't let a background process hand the browser the focus, enki asks KWin (through a small script over D-Bus) to bring the dashboard's window forward, switching virtual desktops if needed.
+
+## Pages
+
+- **Project view:** a year of finished tasks as a heatmap, tokens spent by agent type over 7, 30 or 90 days, and every task with its status, duration and tokens. The chart counts tokens on the day they were spent, so a task that runs overnight is split between two days.
+- **Task view:** the task's workflow by name, drawn as in the studio and fitted to the page, from Start through both approvals to End. It is the team view too: each agent step shows its state, model, effort and how full its context is, and the orchestrator sits top left with its own. A step that came back to the orchestrator wears an orange "With you" badge, and ↩ marks the outcomes that go back to it. Then context by agent, the plan with each step's status, any alert that needs you, and the activity feed. Hover or click a step, a context total or a plan step's owner to pick that agent out everywhere on the page; Escape clears it.
+- **Codebase map:** each repo's [map](memory.md#the-codebase-map), on its checked-out branch, as a graph of bubbles: one per map file, a solid line to its parent and a dashed one to each file it links to, across repos too. Each repo has its own color, and a dashed ring marks a repo with no map yet. Drag bubbles around, pan and zoom the canvas; hover a bubble to light its neighbours. Click one, or Tab to it and press Enter, to read the file on the right, with its parent's description, its `Files:`, its size, its areas and links, and links that open the file they name. A yellow ring marks a file over its size limit or missing from its parent's list.
+- **Workflows:** every workflow available to the project, with duplicate, export and import. Importing shows each new agent's permissions before anything is saved.
+- **Agents:** every agent, enki's own and your library's, with what each may do, its outcomes, what it runs on and which workflows use it. Make a new one from a template, duplicate one of enki's, export and import them. The editor sets the name and type; what enki enforces (what it may change, blind, browser, dev server, spec, plan), with a warning for risky combinations; the outcomes, refusing a rename or removal a workflow still wires; the default model, effort, timeout and skills; and the instructions, with a preview. Enki's own agents open read-only, with a button to duplicate them.
+- **Studio:** each workflow opens on one screen. Drag around the canvas and zoom; drag agents in from the library on the left; drag steps to place them; drag from an outcome's port to a step to wire it, or onto empty canvas to create the step there. Lines run square: drag any segment to move it, double-click a segment to add a bend and a bend's handle to take it out, drag a line's end onto another block to send the outcome there, and remove a line with the × on it. The library has two tabs: agents, and built-in steps like Tests, which run without an agent. The inspector on the right sets each step's agent, its model, effort and extra skills for this workflow, which steps it waits for, its hand-off limit, and each loop's limit, and offers everything dragging does from the keyboard. Both side panels open and close. A loop without a limit shows red, every change is checked by the same rules the CLI uses, and Save stays off until the workflow can run. Undo and redo with Ctrl+Z and Ctrl+Shift+Z. Enki's own workflows open read-only, with a button to duplicate them. On a phone the studio is for looking only.
+- **Project settings:** it edits the project's `.enki/config.json`: the default workflow, activation, worktrees and the working branch, timeouts, the browser, the port range and database copying. Memory mode, repos and their test and dev server commands are shown but not editable. Changes apply to the next agent started. If the file changes elsewhere while you have unsaved edits, the page asks you to reload instead of overwriting it.
+
+## Agent states
+
+The states are herdr's own (Running, Idle, Done, Needs you), plus Stopped, and Error for an agent that vanished from an open task. They follow herdr within about 2 seconds. Plan steps come from the approved plan's **Steps** list: each `enki ask --step N` (or `--step 2,3,4`: one visit does all of them) marks its steps active. When the agent finishes they're done, or failed if its outcome went to the orchestrator instead (blocked, an error).
+
+## How it works
+
+- One server per computer, owned by no session. It listens only on `127.0.0.1`, refuses requests for any other host name and sends no CORS headers. Its only writes are the settings, workflow and agent saves, copies, imports and deletes made on its pages, which it accepts only from its own page: the request must come from the dashboard's own origin, as JSON, with a token only that page can read. The project comes from enki's registry, never from the request, and only the fields on the page can change. It exits after 30 minutes with no open task and no open page.
+- It reads what enki already writes: the project registry in `~/.enki/projects.json`, each task's state, event log and activity log, and herdr's agent list. Tokens come from Claude Code's own session transcripts. A cache in `~/.enki/dashboard.db` saves rereading them, and can be deleted at any time.
+- `enki dashboard status` and `enki dashboard stop` check or stop it. After a plugin update, the next start replaces an older server.
+- `ENKI_DASHBOARD_PORT` picks another port. `ENKI_DASHBOARD=off` stops enki from starting it.

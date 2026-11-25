@@ -263,7 +263,7 @@ function checkBash(ctx, command) {
       continue
     }
     for (const target of writeTargets(parsed)) {
-      // A path only the shell can resolve can't be judged here. The README states this limit.
+      // A path only the shell can resolve can't be judged here. docs/security.md states this limit.
       if (isDynamic(target) || (!cwdKnown && !isAbsolute(target) && !target.startsWith('~'))) continue
       const reason = checkWrite({ ...ctx, cwd }, target)
       if (reason) return reason
